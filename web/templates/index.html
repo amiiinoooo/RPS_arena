@@ -1,0 +1,151 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+    <title>RPS Arena | Online Multiplayer</title>
+    <link
+        rel="stylesheet"
+        href="/static/style.css"
+    >
+    <script src="/static/app.js" defer></script>
+</head>
+<body>
+    <div class="background-glow"></div>
+
+    <main class="container">
+        <header class="header">
+            <div class="brand">
+                <span class="brand-icon">⚔️</span>
+                <span>RPS <strong>ARENA</strong></span>
+            </div>
+
+            <span class="version">WEB EDITION</span>
+        </header>
+
+        <section class="hero">
+            <div class="eyebrow">
+                THE ONLINE ROCK PAPER SCISSORS ARENA
+            </div>
+
+            <h1>
+                Every move
+                <span>counts.</span>
+            </h1>
+
+            <p>
+                Challenge your friends, enter the arena,
+                and fight for the top of the leaderboard.
+            </p>
+        </section>
+
+        <section class="card" id="auth-screen">
+            <div class="card-heading">
+                <h2 id="form-title">Welcome back</h2>
+                <p id="form-description">
+                    Enter your account to join the arena.
+                </p>
+            </div>
+
+            <form id="auth-form">
+                <label for="username">USERNAME</label>
+
+                <input
+                    id="username"
+                    type="text"
+                    autocomplete="username"
+                    minlength="3"
+                    maxlength="20"
+                    placeholder="Enter your username"
+                    required
+                >
+
+                <label for="password">PASSWORD</label>
+
+                <input
+                    id="password"
+                    type="password"
+                    autocomplete="current-password"
+                    minlength="8"
+                    maxlength="128"
+                    placeholder="Enter your password"
+                    required
+                >
+
+                <button
+                    type="submit"
+                    id="submit-button"
+                    class="primary-button"
+                >
+                    ENTER THE ARENA
+                </button>
+            </form>
+
+            <p class="switch-text">
+                <span id="switch-prompt">
+                    Don't have an account?
+                </span>
+
+                <button
+                    type="button"
+                    id="switch-button"
+                    class="text-button"
+                >
+                    Create account
+                </button>
+            </p>
+        </section>
+
+        <section
+            class="card dashboard hidden"
+            id="dashboard-screen"
+        >
+            <div class="welcome-icon">🏆</div>
+
+            <h2>You're in the arena!</h2>
+
+            <p>
+                Welcome,
+                <strong id="display-username"></strong>.
+            </p>
+
+            <div class="info-box">
+                <span class="live-dot"></span>
+                Connected to the RPS Arena game server
+            </div>
+
+            <p class="coming-soon">
+                Login is working! The multiplayer lobby,
+                rooms and gameplay are the next milestone.
+            </p>
+
+            <button
+                id="logout-button"
+                type="button"
+                class="secondary-button"
+            >
+                LOG OUT
+            </button>
+        </section>
+
+        <div
+            id="message"
+            class="message hidden"
+            role="status"
+            aria-live="polite"
+        ></div>
+
+        <footer>
+            <span id="connection-indicator">
+                Checking game server...
+            </span>
+
+            <span>RPS ARENA © 2026</span>
+        </footer>
+    </main>
+</body>
+</html>
