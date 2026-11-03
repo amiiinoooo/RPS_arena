@@ -1,73 +1,71 @@
 
 /*
 ==========================================
-RPS ARENA WEB
-Login, Lobby, Rooms, Gameplay, Results
+RPS ARENA WEB CLIENT
+Login, Lobby, Gameplay, Browser Presence
 ==========================================
 */
 
 const authScreen = document.getElementById(
     "auth-screen"
 );
-
 const dashboardScreen = document.getElementById(
     "dashboard-screen"
 );
-
-const form = document.getElementById(
-    "auth-form"
-);
-
+const form = document.getElementById("auth-form");
 const formTitle = document.getElementById(
     "form-title"
 );
-
 const formDescription = document.getElementById(
     "form-description"
 );
-
 const usernameInput = document.getElementById(
     "username"
 );
-
 const passwordInput = document.getElementById(
     "password"
 );
-
 const submitButton = document.getElementById(
     "submit-button"
 );
-
 const switchButton = document.getElementById(
     "switch-button"
 );
-
 const switchPrompt = document.getElementById(
     "switch-prompt"
 );
-
 const messageBox = document.getElementById(
     "message"
 );
-
 const connectionIndicator = document.getElementById(
     "connection-indicator"
 );
 
 
+// ==========================================
+// CLIENT STATE
+// ==========================================
+
 let formMode = "login";
 let username = null;
-
 let busy = false;
 let stateBusy = false;
-
 let currentState = null;
 let lastSnapshot = null;
 let lastNotice = null;
 
+const TAB_STORAGE_KEY = "rps_arena_tab_id";
+
+let tabId = sessionStorage.getItem(TAB_STORAGE_KEY);
+
+if (!tabId) {
+    tabId = crypto.randomUUID();
+    sessionStorage.setItem(TAB_STORAGE_KEY, tabId);
+}
+
 
 // ==========================================
-// API
+// NETWORK
 // ==========================================
 
 async function apiRequest(path, data = null) {
@@ -86,13 +84,80 @@ async function apiRequest(path, data = null) {
         options.body = JSON.stringify(data);
     }
 
-    const response = await fetch(
-        path,
-        options
+    const response = await fetch(path, options);
+    const result = await response.json();
+
+    return result;
+}
+
+
+// ==========================================
+// BROWSER PRESENCE
+// ==========================================
+
+async function sendPresence() {
+    if (!username) {
+        return;
+    }
+
+    try {
+        const result = await apiRequest(
+            "/api/presence",
+            {tab_id: tabId}
+        );
+
+        if (!result.success) {
+            await checkStatus();
+        }
+    } catch (error) {
+        // Temporary network problems are handled
+        // by the server's inactivity timeout.
+    }
+}
+
+
+function notifyBrowserClosing() {
+    if (!username) {
+        return;
+    }
+
+    const data = new Blob(
+        [JSON.stringify({tab_id: tabId})],
+        {type: "application/json"}
     );
 
-    return await response.json();
+    navigator.sendBeacon(
+        "/api/browser-leave",
+        data
+    );
 }
+
+
+// A refresh also triggers pagehide.
+// The server waits 4 seconds so the
+// refreshed page can renew its session.
+window.addEventListener(
+    "pagehide",
+    notifyBrowserClosing
+);
+
+window.addEventListener(
+    "pageshow",
+    () => {
+        if (username) {
+            sendPresence();
+        }
+    }
+);
+
+window.addEventListener(
+    "focus",
+    () => {
+        if (username) {
+            sendPresence();
+        }
+    }
+);
 
 
 // ==========================================
@@ -113,22 +178,43 @@ function showMessage(text, isError = false) {
 
 
 // ==========================================
-// UI HELPERS
+// ELEMENT HELPERS
 // ==========================================
 
-function element(
-    tag,
-    text = "",
-    className = ""
-) {
+function element(tag, text = "") {
     const node = document.createElement(tag);
+    node.textContent = String(text);
+    return node;
+}
 
-    node.textContent = text;
 
-    if (className) {
-        node.className = className;
-    }
+function addInfo(parent, text, color = "#AEC0D7") {
+    const node = element("p", text);
+    node.style.color = color;
+    node.style.lineHeight = "1.6";
+    parent.appendChild(node);
+    return node;
+}
 
+
+function addTitle(parent, text) {
+    const node = element("h3", text);
+    node.style.marginTop = "24px";
+    parent.appendChild(node);
+    return node;
+}
+
+
+function addPanel(parent) {
+    const node = document.createElement("div");
+
+    node.style.background = "#101827";
+    node.style.border = "1px solid #2a3955";
+    node.style.borderRadius = "12px";
+    node.style.padding = "18px";
+    node.style.marginTop = "14px";
+
+    parent.appendChild(node);
     return node;
 }
 
@@ -140,75 +226,21 @@ function addButton(
     primary = true,
     disabled = false
 ) {
-    const button = element(
-        "button",
-        label,
-        primary
-            ? "primary-button"
-            : "secondary-button"
-    );
+    const button = element("button", label);
 
     button.type = "button";
-    button.disabled = disabled;
+
+    button.className = primary
+        ? "primary-button"
+        : "secondary-button";
 
     button.style.marginTop = "12px";
+    button.disabled = disabled;
 
-    button.addEventListener(
-        "click",
-        callback
-    );
-
+    button.addEventListener("click", callback);
     parent.appendChild(button);
 
     return button;
-}
-
-
-function addInfo(
-    parent,
-    text,
-    color = "#AEC0D7"
-) {
-    const paragraph = element(
-        "p",
-        String(text)
-    );
-
-    paragraph.style.color = color;
-    paragraph.style.lineHeight = "1.6";
-
-    parent.appendChild(paragraph);
-
-    return paragraph;
-}
-
-
-function addPanel(parent) {
-    const panel = document.createElement("div");
-
-    panel.style.background = "#101827";
-    panel.style.border = "1px solid #2a3955";
-    panel.style.borderRadius = "12px";
-    panel.style.padding = "18px";
-    panel.style.marginTop = "14px";
-
-    parent.appendChild(panel);
-
-    return panel;
-}
-
-
-function addTitle(parent, text) {
-    const heading = element(
-        "h3",
-        text
-    );
-
-    heading.style.marginTop = "24px";
-
-    parent.appendChild(heading);
-
-    return heading;
 }
 
 
@@ -241,11 +273,8 @@ function showDashboard(playerUsername) {
     dashboardScreen.style.width =
         "min(100%, 760px)";
 
-    dashboardScreen.style.maxWidth =
-        "760px";
-
-    dashboardScreen.style.textAlign =
-        "left";
+    dashboardScreen.style.maxWidth = "760px";
+    dashboardScreen.style.textAlign = "left";
 
     connectionIndicator.textContent =
         "TCP game server: Connected";
@@ -253,12 +282,13 @@ function showDashboard(playerUsername) {
     if (changed) {
         lastSnapshot = null;
         renderDashboard();
+        sendPresence();
     }
 }
 
 
 // ==========================================
-// DASHBOARD ROUTER
+// MAIN SCREEN ROUTER
 // ==========================================
 
 function renderDashboard() {
@@ -269,42 +299,29 @@ function renderDashboard() {
     dashboardScreen.replaceChildren();
 
     const header = document.createElement("div");
-
     header.style.display = "flex";
-    header.style.justifyContent =
-        "space-between";
+    header.style.justifyContent = "space-between";
     header.style.alignItems = "center";
     header.style.flexWrap = "wrap";
     header.style.gap = "12px";
 
-    const heading = element(
-        "h2",
-        "RPS ARENA"
-    );
-
+    const heading = element("h2", "RPS ARENA");
     heading.style.margin = "0";
 
-    const playerLabel = element(
+    const playerName = element(
         "strong",
         "Player: " + username
     );
-
-    playerLabel.style.color = "#58def2";
+    playerName.style.color = "#58def2";
 
     header.appendChild(heading);
-    header.appendChild(playerLabel);
-
+    header.appendChild(playerName);
     dashboardScreen.appendChild(header);
 
-    const separator = document.createElement(
-        "hr"
-    );
-
+    const separator = document.createElement("hr");
     separator.style.border = "none";
-    separator.style.borderTop =
-        "1px solid #2a3955";
+    separator.style.borderTop = "1px solid #2a3955";
     separator.style.margin = "20px 0";
-
     dashboardScreen.appendChild(separator);
 
     if (!currentState) {
@@ -312,7 +329,6 @@ function renderDashboard() {
             dashboardScreen,
             "Loading multiplayer lobby..."
         );
-
     } else if (
         currentState.in_room &&
         currentState.room
@@ -321,26 +337,14 @@ function renderDashboard() {
         const match = currentState.match;
 
         if (room.status === "playing") {
-            renderGame(
-                dashboardScreen,
-                room,
-                match
-            );
-
+            renderGame(dashboardScreen, room, match);
         } else if (room.status === "finished") {
             renderFinished(
-                dashboardScreen,
-                room,
-                match
+                dashboardScreen, room, match
             );
-
         } else {
-            renderRoom(
-                dashboardScreen,
-                room
-            );
+            renderRoom(dashboardScreen, room);
         }
-
     } else {
         renderLobby(
             dashboardScreen,
@@ -358,12 +362,11 @@ function renderDashboard() {
 
 
 // ==========================================
-// AUTH FORM
+// AUTHENTICATION
 // ==========================================
 
 function updateForm() {
-    const registering =
-        formMode === "register";
+    const registering = formMode === "register";
 
     formTitle.textContent = registering
         ? "Join the arena"
@@ -391,83 +394,71 @@ function updateForm() {
 }
 
 
-switchButton.addEventListener(
-    "click",
-    () => {
-        formMode = formMode === "login"
-            ? "register"
-            : "login";
+switchButton.addEventListener("click", () => {
+    formMode = formMode === "login"
+        ? "register"
+        : "login";
 
-        passwordInput.value = "";
-        showMessage("");
-        updateForm();
+    passwordInput.value = "";
+    showMessage("");
+    updateForm();
+});
+
+
+form.addEventListener("submit", async event => {
+    event.preventDefault();
+
+    if (busy) {
+        return;
     }
-);
 
+    const enteredUsername =
+        usernameInput.value.trim();
 
-form.addEventListener(
-    "submit",
-    async (event) => {
-        event.preventDefault();
+    const password = passwordInput.value;
 
-        if (busy) {
-            return;
-        }
+    busy = true;
+    submitButton.disabled = true;
+    showMessage("");
 
-        const enteredUsername =
-            usernameInput.value.trim();
-
-        const password =
-            passwordInput.value;
-
-        busy = true;
-        submitButton.disabled = true;
-
-        showMessage("");
-
-        try {
-            const result = await apiRequest(
-                "/api/" + formMode,
-                {
-                    username: enteredUsername,
-                    password: password
-                }
-            );
-
-            showMessage(
-                result.message || "",
-                !result.success
-            );
-
-            if (result.success) {
-                passwordInput.value = "";
-
-                if (formMode === "register") {
-                    formMode = "login";
-                    updateForm();
-
-                } else {
-                    showDashboard(
-                        result.username ||
-                        enteredUsername
-                    );
-
-                    await refreshState();
-                }
+    try {
+        const result = await apiRequest(
+            "/api/" + formMode,
+            {
+                username: enteredUsername,
+                password: password
             }
+        );
 
-        } catch (error) {
-            showMessage(
-                "Unable to reach the web server.",
-                true
-            );
+        showMessage(
+            result.message || "",
+            !result.success
+        );
 
-        } finally {
-            busy = false;
-            submitButton.disabled = false;
+        if (result.success) {
+            passwordInput.value = "";
+
+            if (formMode === "register") {
+                formMode = "login";
+                updateForm();
+            } else {
+                showDashboard(
+                    result.username || enteredUsername
+                );
+
+                await refreshState();
+            }
         }
+    } catch (error) {
+        showMessage(
+            "Unable to reach the web server.",
+            true
+        );
+    } finally {
+        busy = false;
+        submitButton.disabled = false;
     }
-);
+});
 
 
 // ==========================================
@@ -475,10 +466,7 @@ form.addEventListener(
 // ==========================================
 
 function renderLobby(parent, rooms) {
-    addTitle(
-        parent,
-        "MULTIPLAYER LOBBY"
-    );
+    addTitle(parent, "MULTIPLAYER LOBBY");
 
     addInfo(
         parent,
@@ -498,10 +486,7 @@ function renderLobby(parent, rooms) {
         false
     );
 
-    addTitle(
-        parent,
-        "Available Rooms"
-    );
+    addTitle(parent, "Available Rooms");
 
     if (rooms.length === 0) {
         const panel = addPanel(parent);
@@ -510,7 +495,6 @@ function renderLobby(parent, rooms) {
             panel,
             "No rooms available. Create the first one!"
         );
-
         return;
     }
 
@@ -524,10 +508,7 @@ function renderLobby(parent, rooms) {
             )
         );
 
-        addInfo(
-            panel,
-            "Host: " + room.host
-        );
+        addInfo(panel, "Host: " + room.host);
 
         addInfo(
             panel,
@@ -538,15 +519,13 @@ function renderLobby(parent, rooms) {
 
         addInfo(
             panel,
-            "Status: " +
-            room.status.toUpperCase()
+            "Status: " + room.status.toUpperCase()
         );
 
         const canJoin = (
             room.status !== "playing" &&
             room.status !== "finished" &&
-            room.player_count <
-                room.max_players
+            room.player_count < room.max_players
         );
 
         if (canJoin) {
@@ -573,10 +552,7 @@ function renderRoom(parent, room) {
         room.name + " | Room #" + room.id
     );
 
-    addInfo(
-        parent,
-        "Host: " + room.host
-    );
+    addInfo(parent, "Host: " + room.host);
 
     addInfo(
         parent,
@@ -585,25 +561,21 @@ function renderRoom(parent, room) {
         "/" + room.max_players
     );
 
-    addTitle(
-        parent,
-        "PLAYERS"
-    );
+    addTitle(parent, "PLAYERS");
 
     for (const player of room.players) {
         const panel = addPanel(parent);
 
-        const isHost =
-            player === room.host;
+        const isHost = player === room.host;
 
-        const ready =
-            room.ready_players.includes(player);
+        const ready = room.ready_players.includes(
+            player
+        );
 
         panel.appendChild(
             element(
                 "strong",
-                player +
-                (isHost ? " (HOST)" : "")
+                player + (isHost ? " (HOST)" : "")
             )
         );
 
@@ -614,14 +586,13 @@ function renderRoom(parent, room) {
         );
     }
 
-    const myReady =
-        room.ready_players.includes(username);
+    const myReady = room.ready_players.includes(
+        username
+    );
 
     addButton(
         parent,
-        myReady
-            ? "CANCEL READY"
-            : "I'M READY",
+        myReady ? "CANCEL READY" : "I'M READY",
         () => performAction(
             myReady ? "unready" : "ready"
         ),
@@ -632,9 +603,7 @@ function renderRoom(parent, room) {
         addButton(
             parent,
             "START GAME",
-            () => performAction(
-                "start_game"
-            ),
+            () => performAction("start_game"),
             true,
             !room.can_start
         );
@@ -650,9 +619,7 @@ function renderRoom(parent, room) {
     addButton(
         parent,
         "LEAVE ROOM",
-        () => performAction(
-            "leave_room"
-        ),
+        () => performAction("leave_room"),
         false
     );
 }
@@ -695,6 +662,7 @@ function renderScoreboard(parent, scores) {
         line.style.padding = "10px";
         line.style.margin = "6px 0";
         line.style.borderRadius = "8px";
+
         line.style.background =
             player === username
                 ? "#263f63"
@@ -706,7 +674,6 @@ function renderScoreboard(parent, scores) {
                 : "#f3f6ff";
 
         panel.appendChild(line);
-
         previousScore = score;
     });
 }
@@ -732,8 +699,7 @@ function renderRoundResults(parent, result) {
         const [player, move]
         of Object.entries(result.choices || {})
     ) {
-        const points =
-            result.points?.[player] ?? 0;
+        const points = result.points?.[player] ?? 0;
 
         const line = element(
             "p",
@@ -744,6 +710,7 @@ function renderRoundResults(parent, result) {
 
         line.style.padding = "9px";
         line.style.margin = "5px 0";
+
         line.style.color =
             player === username
                 ? "#58def2"
@@ -755,57 +722,42 @@ function renderRoundResults(parent, result) {
 
 
 // ==========================================
-// GAMEPLAY SCREEN
+// ACTIVE MATCH
 // ==========================================
 
 function renderGame(parent, room, match) {
-    addTitle(
-        parent,
-        "⚔️ " + room.name
-    );
+    addTitle(parent, "⚔️ " + room.name);
 
     if (!match) {
-        addInfo(
-            parent,
-            "Preparing match..."
-        );
-
+        addInfo(parent, "Preparing match...");
         return;
     }
 
-    const isTiebreaker =
+    const tiebreaker =
         match.round > match.total_rounds;
 
-    const roundText =
+    addTitle(
+        parent,
         "ROUND " + match.round +
-        (isTiebreaker ? " | TIEBREAKER" : "");
-
-    addTitle(parent, roundText);
+        (tiebreaker ? " | TIEBREAKER" : "")
+    );
 
     const timer = element(
         "h2",
         "⏱ " + match.remaining + " seconds"
     );
 
-    timer.style.color =
-        match.remaining <= 5
-            ? "#ff727e"
-            : "#40d7a0";
-
     timer.style.fontSize = "32px";
+    timer.style.color = match.remaining <= 5
+        ? "#ff727e"
+        : "#40d7a0";
 
     parent.appendChild(timer);
 
-    renderScoreboard(
-        parent,
-        match.scores
-    );
+    renderScoreboard(parent, match.scores);
 
     if (match.phase === "results") {
-        addTitle(
-            parent,
-            "ROUND COMPLETE"
-        );
+        addTitle(parent, "ROUND COMPLETE");
 
         renderRoundResults(
             parent,
@@ -821,10 +773,7 @@ function renderGame(parent, room, match) {
         const panel = addPanel(parent);
 
         panel.appendChild(
-            element(
-                "h3",
-                "CHOOSE YOUR MOVE"
-            )
+            element("h3", "CHOOSE YOUR MOVE")
         );
 
         if (match.my_choice) {
@@ -837,32 +786,26 @@ function renderGame(parent, room, match) {
 
             addInfo(
                 panel,
-                "Waiting for the other players..."
+                "Waiting for other players..."
             );
 
         } else {
             const moves = [
-                {
-                    name: "rock",
-                    label: "🪨 ROCK"
-                },
-                {
-                    name: "paper",
-                    label: "📄 PAPER"
-                },
-                {
-                    name: "scissors",
-                    label: "✂️ SCISSORS"
-                }
+                ["rock", "🪨 ROCK"],
+                ["paper", "📄 PAPER"],
+                ["scissors", "✂️ SCISSORS"]
             ];
 
-            for (const move of moves) {
+            for (const [move, label] of moves) {
                 addButton(
                     panel,
-                    move.label,
-                    () => chooseMove(
-                        move.name,
-                        match.round
+                    label,
+                    () => performAction(
+                        "choose",
+                        {
+                            move: move,
+                            round: match.round
+                        }
                     ),
                     true,
                     busy || match.remaining <= 0
@@ -885,14 +828,8 @@ function renderGame(parent, room, match) {
             addInfo(
                 parent,
                 player + ": " +
-                (
-                    submitted
-                        ? "Submitted ✓"
-                        : "Choosing..."
-                ),
-                submitted
-                    ? "#40d7a0"
-                    : "#AEC0D7"
+                (submitted ? "Submitted ✓" : "Choosing..."),
+                submitted ? "#40d7a0" : "#AEC0D7"
             );
         }
     }
@@ -900,42 +837,33 @@ function renderGame(parent, room, match) {
     addButton(
         parent,
         "LEAVE MATCH",
-        () => performAction(
-            "leave_room"
-        ),
+        () => performAction("leave_room"),
         false
     );
 }
 
 
 // ==========================================
-// FINAL RESULTS
+// MATCH FINISHED
 // ==========================================
 
 function renderFinished(parent, room, match) {
-    addTitle(
-        parent,
-        "🏆 MATCH FINISHED"
-    );
+    addTitle(parent, "🏆 MATCH FINISHED");
 
     if (!match) {
-        addInfo(
-            parent,
-            "Loading final results..."
-        );
-
+        addInfo(parent, "Loading results...");
         return;
     }
 
     const winners = match.winners || [];
 
-    const winnerText = match.draw
+    const resultText = match.draw
         ? "DRAW: " + winners.join(", ")
         : "WINNER: " + winners.join(", ");
 
     const winnerTitle = element(
         "h2",
-        winnerText
+        resultText
     );
 
     winnerTitle.style.color = "#40d7a0";
@@ -948,10 +876,7 @@ function renderFinished(parent, room, match) {
         "Rounds played: " + match.round
     );
 
-    renderScoreboard(
-        parent,
-        match.scores
-    );
+    renderScoreboard(parent, match.scores);
 
     renderRoundResults(
         parent,
@@ -962,9 +887,7 @@ function renderFinished(parent, room, match) {
         addButton(
             parent,
             "🔄 PLAY AGAIN",
-            () => performAction(
-                "reset_match"
-            )
+            () => performAction("reset_match")
         );
     } else {
         addInfo(
@@ -976,25 +899,8 @@ function renderFinished(parent, room, match) {
     addButton(
         parent,
         "LEAVE ROOM",
-        () => performAction(
-            "leave_room"
-        ),
+        () => performAction("leave_room"),
         false
-    );
-}
-
-
-// ==========================================
-// GAME MOVE
-// ==========================================
-
-async function chooseMove(move, roundNumber) {
-    await performAction(
-        "choose",
-        {
-            move: move,
-            round: roundNumber
-        }
     );
 }
 
@@ -1012,37 +918,31 @@ async function createRoom() {
         return;
     }
 
-    const cleanedName = roomName.trim();
+    const cleaned = roomName.trim();
 
     if (
-        cleanedName.length < 1 ||
-        cleanedName.length > 30
+        cleaned.length < 1 ||
+        cleaned.length > 30
     ) {
         showMessage(
             "Room name must be 1-30 characters.",
             true
         );
-
         return;
     }
 
     await performAction(
         "create_room",
-        {
-            room_name: cleanedName
-        }
+        {room_name: cleaned}
     );
 }
 
 
 // ==========================================
-// SEND GAME ACTION
+// GAME ACTIONS
 // ==========================================
 
-async function performAction(
-    action,
-    payload = {}
-) {
+async function performAction(action, payload = {}) {
     if (busy || !username) {
         return;
     }
@@ -1065,7 +965,6 @@ async function performAction(
 
         if (result.success) {
             lastSnapshot = null;
-
             await refreshState();
         }
 
@@ -1082,7 +981,7 @@ async function performAction(
 
 
 // ==========================================
-// LIVE STATE POLLING
+// LIVE STATE UPDATES
 // ==========================================
 
 async function refreshState() {
@@ -1107,12 +1006,8 @@ async function refreshState() {
             if (
                 result.message &&
                 (
-                    result.message.includes(
-                        "log in"
-                    ) ||
-                    result.message.includes(
-                        "connection lost"
-                    )
+                    result.message.includes("log in") ||
+                    result.message.includes("connection lost")
                 )
             ) {
                 showLoginScreen();
@@ -1135,16 +1030,11 @@ async function refreshState() {
             result.notice !== lastNotice
         ) {
             lastNotice = result.notice;
-
-            showMessage(
-                result.notice,
-                true
-            );
+            showMessage(result.notice, true);
         }
 
         if (snapshot !== lastSnapshot) {
             lastSnapshot = snapshot;
-
             renderDashboard();
         }
 
@@ -1179,7 +1069,6 @@ async function logout() {
 
         if (result.success) {
             showLoginScreen();
-
             showMessage(
                 "Logged out successfully."
             );
@@ -1203,7 +1092,7 @@ async function logout() {
 
 
 // ==========================================
-// CHECK LOGIN SESSION
+// SESSION CHECK
 // ==========================================
 
 async function checkStatus() {
@@ -1225,9 +1114,7 @@ async function checkStatus() {
         }
 
         if (result.logged_in) {
-            showDashboard(
-                result.username
-            );
+            showDashboard(result.username);
 
             if (!currentState) {
                 await refreshState();
@@ -1245,20 +1132,17 @@ async function checkStatus() {
 
 
 // ==========================================
-// START APPLICATION
+// INITIALIZE
 // ==========================================
 
 updateForm();
 checkStatus();
 
-// Check session every five seconds.
-setInterval(
-    checkStatus,
-    5000
-);
+// Keep the browser session active.
+setInterval(sendPresence, 2000);
 
-// Update gameplay, timer and lobby every second.
-setInterval(
-    refreshState,
-    1000
-);
+// Check authentication status.
+setInterval(checkStatus, 5000);
+
+// Update game and lobby.
+setInterval(refreshState, 1000);

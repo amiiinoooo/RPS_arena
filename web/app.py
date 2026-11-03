@@ -12,7 +12,6 @@ from flask import Flask, jsonify, render_template, request, session
 
 # ==========================================
 # RPS ARENA WEB GATEWAY
-# Browser -> Flask -> Existing TCP server
 # ==========================================
 
 app = Flask(__name__)
@@ -30,10 +29,11 @@ GAME_HOST = os.environ.get(
 )
 GAME_PORT = 5000
 
-connections = {}
-connections_lock = threading.RLock()
+# Time allowed after a browser tab closes.
+CLOSE_GRACE_SECONDS = 4
 
-SESSION_IDLE_SECONDS = 1800
+# Backup if the browser cannot send a close notice.
+BROWSER_TIMEOUT_SECONDS = 20
 
 ALLOWED_ACTIONS = {
     "create_room",
@@ -46,29 +46,27 @@ ALLOWED_ACTIONS = {
     "choose",
 }
 
-VALID_MOVES = {
-    "rock", "paper", "scissors"
-}
+VALID_MOVES = {"rock", "paper", "scissors"}
+
+connections = {}
+browser_tabs = {}
+connections_lock = threading.RLock()
 
 
 # ==========================================
-# TCP CONNECTION
+# EXISTING TCP GAME PROTOCOL
 # ==========================================
 
 class GameConnection:
-
     def __init__(self):
         self.socket = socket.create_connection(
             (GAME_HOST, GAME_PORT),
             timeout=8
         )
-
         self.socket.settimeout(8)
-
         self.reader = self.socket.makefile(
             "r", encoding="utf-8"
         )
-
         self.lock = threading.Lock()
         self.last_used = time.monotonic()
 
@@ -108,9 +106,7 @@ class GameConnection:
 
     def close(self):
         try:
-            self.socket.shutdown(
-                socket.SHUT_RDWR
-            )
+            self.socket.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
 
@@ -126,7 +122,7 @@ class GameConnection:
 
 
 # ==========================================
-# HELPERS
+# RESPONSE HELPERS
 # ==========================================
 
 def success(message="", **data):
@@ -144,8 +140,12 @@ def failure(message, status=400):
     }), status
 
 
+def current_sid():
+    return session.get("sid")
+
+
 def get_connection():
-    sid = session.get("sid")
+    sid = current_sid()
 
     if not sid:
         return None
@@ -159,17 +159,15 @@ def remove_connection(sid):
         return
 
     with connections_lock:
-        connection = connections.pop(
-            sid, None
-        )
+        connection = connections.pop(sid, None)
+        browser_tabs.pop(sid, None)
 
     if connection:
         connection.close()
 
 
 def disconnect_browser():
-    sid = session.get("sid")
-
+    sid = current_sid()
     remove_connection(sid)
     session.clear()
 
@@ -184,7 +182,7 @@ def server_unavailable():
 
 
 # ==========================================
-# BASIC REQUEST PROTECTION
+# REQUEST VALIDATION
 # ==========================================
 
 @app.before_request
@@ -194,34 +192,27 @@ def protect_requests():
 
     origin = request.headers.get("Origin")
 
-    if not origin:
-        return failure(
-            "Missing request origin.",
-            403
-        )
+    if origin:
+        parsed = urlsplit(origin)
 
-    parsed = urlsplit(origin)
+        if (
+            parsed.scheme not in ("http", "https")
+            or parsed.netloc != request.host
+        ):
+            return failure("Invalid request origin.", 403)
 
-    if (
-        parsed.scheme not in ("http", "https")
-        or parsed.netloc != request.host
-    ):
-        return failure(
-            "Invalid request origin.",
-            403
-        )
+    else:
+        # Browsers send Origin for JSON POST requests.
+        return failure("Missing request origin.", 403)
 
     if not request.is_json:
-        return failure(
-            "Expected JSON data.",
-            415
-        )
+        return failure("Expected JSON data.", 415)
 
     return None
 
 
 # ==========================================
-# WEBSITE
+# WEB PAGE
 # ==========================================
 
 @app.get("/")
@@ -230,7 +221,7 @@ def home():
 
 
 # ==========================================
-# REGISTER
+# REGISTRATION
 # ==========================================
 
 @app.post("/api/register")
@@ -243,11 +234,11 @@ def register():
     username = data.get("username")
     password = data.get("password")
 
-    if not isinstance(username, str):
-        return failure("Invalid username.")
-
-    if not isinstance(password, str):
-        return failure("Invalid password.")
+    if (
+        not isinstance(username, str)
+        or not isinstance(password, str)
+    ):
+        return failure("Invalid login details.")
 
     connection = None
 
@@ -287,11 +278,11 @@ def login():
     username = data.get("username")
     password = data.get("password")
 
-    if not isinstance(username, str):
-        return failure("Invalid username.")
-
-    if not isinstance(password, str):
-        return failure("Invalid password.")
+    if (
+        not isinstance(username, str)
+        or not isinstance(password, str)
+    ):
+        return failure("Invalid login details.")
 
     if get_connection() is not None:
         return failure(
@@ -314,9 +305,14 @@ def login():
             return jsonify(result)
 
         sid = secrets.token_urlsafe(32)
+        now = time.monotonic()
 
         with connections_lock:
             connections[sid] = connection
+            browser_tabs[sid] = {
+                "_created": now,
+                "_tabs": {}
+            }
 
         session.clear()
         session["sid"] = sid
@@ -337,6 +333,77 @@ def login():
 
 
 # ==========================================
+# BROWSER PRESENCE
+# ==========================================
+
+def read_tab_id():
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return None
+
+    tab_id = data.get("tab_id")
+
+    if (
+        not isinstance(tab_id, str)
+        or not 8 <= len(tab_id) <= 100
+    ):
+        return None
+
+    return tab_id
+
+
+@app.post("/api/presence")
+def presence():
+    sid = current_sid()
+    tab_id = read_tab_id()
+
+    if not sid or not tab_id:
+        return failure("Invalid browser session.", 401)
+
+    now = time.monotonic()
+
+    with connections_lock:
+        if sid not in connections:
+            return failure("Session expired.", 401)
+
+        record = browser_tabs.get(sid)
+
+        if record is None:
+            return failure("Session expired.", 401)
+
+        # A refreshed page can reactivate its tab.
+        record["_tabs"][tab_id] = {
+            "last_seen": now,
+            "closing_at": None
+        }
+
+    return success("Browser active.")
+
+
+@app.post("/api/browser-leave")
+def browser_leave():
+    sid = current_sid()
+    tab_id = read_tab_id()
+
+    if not sid or not tab_id:
+        return success()
+
+    with connections_lock:
+        record = browser_tabs.get(sid)
+
+        if record:
+            tab = record["_tabs"].get(tab_id)
+
+            if tab:
+                tab["closing_at"] = time.monotonic()
+
+    # The connection is not closed immediately.
+    # Refreshing within the grace period cancels it.
+    return success("Closing tab registered.")
+
+
+# ==========================================
 # SESSION STATUS
 # ==========================================
 
@@ -352,7 +419,6 @@ def status():
 
     try:
         result = connection.send("status")
-
         username = result.get("username")
 
         if result.get("success") and username:
@@ -374,7 +440,7 @@ def status():
 
 
 # ==========================================
-# LIVE PLAYER STATE
+# LIVE LOBBY AND MATCH STATE
 # ==========================================
 
 @app.get("/api/state")
@@ -382,10 +448,7 @@ def player_state():
     connection = get_connection()
 
     if connection is None:
-        return failure(
-            "Please log in first.",
-            401
-        )
+        return failure("Please log in first.", 401)
 
     try:
         state = connection.send("player_state")
@@ -401,9 +464,7 @@ def player_state():
             if room and room.get("status") in (
                 "playing", "finished"
             ):
-                game = connection.send(
-                    "game_state"
-                )
+                game = connection.send("game_state")
 
                 if game.get("success"):
                     match = game.get("match")
@@ -438,7 +499,7 @@ def player_state():
 
 
 # ==========================================
-# ROOM AND GAME ACTIONS
+# GAME ACTIONS
 # ==========================================
 
 @app.post("/api/action")
@@ -446,10 +507,7 @@ def game_action():
     connection = get_connection()
 
     if connection is None:
-        return failure(
-            "Please log in first.",
-            401
-        )
+        return failure("Please log in first.", 401)
 
     data = request.get_json(silent=True)
 
@@ -459,36 +517,30 @@ def game_action():
     action = data.get("action")
 
     if action not in ALLOWED_ACTIONS:
-        return failure(
-            "This action is not available."
-        )
+        return failure("Action not available.")
 
     payload = {}
 
     if action == "create_room":
-        room_name = data.get("room_name")
+        name = data.get("room_name")
 
-        if not isinstance(room_name, str):
-            return failure(
-                "Enter a valid room name."
-            )
+        if not isinstance(name, str):
+            return failure("Invalid room name.")
 
-        room_name = room_name.strip()
+        name = name.strip()
 
-        if not 1 <= len(room_name) <= 30:
+        if not 1 <= len(name) <= 30:
             return failure(
                 "Room name must be 1-30 characters."
             )
 
-        payload["room_name"] = room_name
+        payload["room_name"] = name
 
     elif action == "join_room":
         room_id = data.get("room_id")
 
         if type(room_id) is not int:
-            return failure(
-                "Invalid room ID."
-            )
+            return failure("Invalid room ID.")
 
         payload["room_id"] = room_id
 
@@ -503,19 +555,13 @@ def game_action():
             type(round_number) is not int
             or round_number < 1
         ):
-            return failure(
-                "Invalid round number."
-            )
+            return failure("Invalid round number.")
 
         payload["move"] = move
         payload["round"] = round_number
 
     try:
-        result = connection.send(
-            action,
-            **payload
-        )
-
+        result = connection.send(action, **payload)
         return jsonify(result)
 
     except (OSError, ValueError, ConnectionError):
@@ -538,38 +584,71 @@ def logout():
 
     disconnect_browser()
 
-    return success(
-        "Logged out successfully."
-    )
+    return success("Logged out successfully.")
 
 
 # ==========================================
-# CLEANUP INACTIVE BROWSER SESSIONS
+# BROWSER CLEANUP WORKER
 # ==========================================
 
 def cleanup_sessions():
     while True:
-        time.sleep(60)
-
+        time.sleep(1)
         now = time.monotonic()
+        expired = []
 
         with connections_lock:
-            expired = [
-                sid
-                for sid, connection
-                in connections.items()
-                if (
-                    now - connection.last_used
-                    > SESSION_IDLE_SECONDS
-                )
-            ]
+            for sid, record in list(browser_tabs.items()):
+                tabs = record["_tabs"]
+
+                for tab_id, tab in list(tabs.items()):
+                    closing_at = tab["closing_at"]
+
+                    if closing_at is not None:
+                        if (
+                            now - closing_at
+                            >= CLOSE_GRACE_SECONDS
+                        ):
+                            del tabs[tab_id]
+
+                    elif (
+                        now - tab["last_seen"]
+                        >= BROWSER_TIMEOUT_SECONDS
+                    ):
+                        del tabs[tab_id]
+
+                if not tabs and (
+                    now - record["_created"]
+                    >= CLOSE_GRACE_SECONDS
+                ):
+                    expired.append(sid)
 
         for sid in expired:
-            remove_connection(sid)
+            # Check again in case the browser
+            # refreshed during this cleanup cycle.
+            with connections_lock:
+                record = browser_tabs.get(sid)
+
+                if (
+                    record is None
+                    or record["_tabs"]
+                ):
+                    continue
+
+                connection = connections.pop(
+                    sid, None
+                )
+                browser_tabs.pop(sid, None)
+
+            if connection:
+                print(
+                    "[WEB] Browser session expired."
+                )
+                connection.close()
 
 
 # ==========================================
-# START WEB SERVER
+# START WEB GATEWAY
 # ==========================================
 
 if __name__ == "__main__":
@@ -581,11 +660,9 @@ if __name__ == "__main__":
     print("===================================")
     print("         RPS ARENA WEB")
     print("===================================")
-    print(
-        f"Game server: {GAME_HOST}:{GAME_PORT}"
-    )
+    print(f"Game server: {GAME_HOST}:{GAME_PORT}")
     print("Website: http://127.0.0.1:8000")
-    print("Local testing only")
+    print("Browser close grace: 4 seconds")
     print("===================================")
 
     app.run(
