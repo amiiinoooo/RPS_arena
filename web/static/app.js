@@ -1,17 +1,39 @@
 
-const authScreen = document.getElementById("auth-screen");
+/*
+==========================================
+RPS ARENA WEB
+Login, Lobby, Rooms, Gameplay, Results
+==========================================
+*/
+
+const authScreen = document.getElementById(
+    "auth-screen"
+);
+
 const dashboardScreen = document.getElementById(
     "dashboard-screen"
 );
 
-const form = document.getElementById("auth-form");
-const formTitle = document.getElementById("form-title");
+const form = document.getElementById(
+    "auth-form"
+);
+
+const formTitle = document.getElementById(
+    "form-title"
+);
+
 const formDescription = document.getElementById(
     "form-description"
 );
 
-const usernameInput = document.getElementById("username");
-const passwordInput = document.getElementById("password");
+const usernameInput = document.getElementById(
+    "username"
+);
+
+const passwordInput = document.getElementById(
+    "password"
+);
+
 const submitButton = document.getElementById(
     "submit-button"
 );
@@ -19,38 +41,34 @@ const submitButton = document.getElementById(
 const switchButton = document.getElementById(
     "switch-button"
 );
+
 const switchPrompt = document.getElementById(
     "switch-prompt"
 );
 
-const logoutButton = document.getElementById(
-    "logout-button"
-);
-
-const messageBox = document.getElementById("message");
-const displayUsername = document.getElementById(
-    "display-username"
+const messageBox = document.getElementById(
+    "message"
 );
 
 const connectionIndicator = document.getElementById(
     "connection-indicator"
 );
 
+
 let formMode = "login";
+let username = null;
+
 let busy = false;
+let stateBusy = false;
+
+let currentState = null;
+let lastSnapshot = null;
+let lastNotice = null;
 
 
-function showMessage(text, isError = false) {
-    messageBox.textContent = text;
-    messageBox.className = isError
-        ? "message error"
-        : "message success";
-
-    if (!text) {
-        messageBox.classList.add("hidden");
-    }
-}
-
+// ==========================================
+// API
+// ==========================================
 
 async function apiRequest(path, data = null) {
     const options = {
@@ -62,23 +80,148 @@ async function apiRequest(path, data = null) {
     };
 
     if (data !== null) {
-        options.headers["Content-Type"] = "application/json";
+        options.headers["Content-Type"] =
+            "application/json";
+
         options.body = JSON.stringify(data);
     }
 
-    const response = await fetch(path, options);
+    const response = await fetch(
+        path,
+        options
+    );
 
-    const result = await response.json();
-
-    if (!response.ok && result.success) {
-        throw new Error("Unexpected server response.");
-    }
-
-    return result;
+    return await response.json();
 }
 
 
+// ==========================================
+// MESSAGES
+// ==========================================
+
+function showMessage(text, isError = false) {
+    messageBox.textContent = text || "";
+
+    messageBox.className = isError
+        ? "message error"
+        : "message success";
+
+    if (!text) {
+        messageBox.classList.add("hidden");
+    }
+}
+
+
+// ==========================================
+// UI HELPERS
+// ==========================================
+
+function element(
+    tag,
+    text = "",
+    className = ""
+) {
+    const node = document.createElement(tag);
+
+    node.textContent = text;
+
+    if (className) {
+        node.className = className;
+    }
+
+    return node;
+}
+
+
+function addButton(
+    parent,
+    label,
+    callback,
+    primary = true,
+    disabled = false
+) {
+    const button = element(
+        "button",
+        label,
+        primary
+            ? "primary-button"
+            : "secondary-button"
+    );
+
+    button.type = "button";
+    button.disabled = disabled;
+
+    button.style.marginTop = "12px";
+
+    button.addEventListener(
+        "click",
+        callback
+    );
+
+    parent.appendChild(button);
+
+    return button;
+}
+
+
+function addInfo(
+    parent,
+    text,
+    color = "#AEC0D7"
+) {
+    const paragraph = element(
+        "p",
+        String(text)
+    );
+
+    paragraph.style.color = color;
+    paragraph.style.lineHeight = "1.6";
+
+    parent.appendChild(paragraph);
+
+    return paragraph;
+}
+
+
+function addPanel(parent) {
+    const panel = document.createElement("div");
+
+    panel.style.background = "#101827";
+    panel.style.border = "1px solid #2a3955";
+    panel.style.borderRadius = "12px";
+    panel.style.padding = "18px";
+    panel.style.marginTop = "14px";
+
+    parent.appendChild(panel);
+
+    return panel;
+}
+
+
+function addTitle(parent, text) {
+    const heading = element(
+        "h3",
+        text
+    );
+
+    heading.style.marginTop = "24px";
+
+    parent.appendChild(heading);
+
+    return heading;
+}
+
+
+// ==========================================
+// SCREEN MANAGEMENT
+// ==========================================
+
 function showLoginScreen() {
+    username = null;
+    currentState = null;
+    lastSnapshot = null;
+    lastNotice = null;
+
     authScreen.classList.remove("hidden");
     dashboardScreen.classList.add("hidden");
 
@@ -87,19 +230,140 @@ function showLoginScreen() {
 }
 
 
-function showDashboard(username) {
+function showDashboard(playerUsername) {
+    const changed = username !== playerUsername;
+
+    username = playerUsername;
+
     authScreen.classList.add("hidden");
     dashboardScreen.classList.remove("hidden");
 
-    displayUsername.textContent = username;
+    dashboardScreen.style.width =
+        "min(100%, 760px)";
+
+    dashboardScreen.style.maxWidth =
+        "760px";
+
+    dashboardScreen.style.textAlign =
+        "left";
 
     connectionIndicator.textContent =
         "TCP game server: Connected";
+
+    if (changed) {
+        lastSnapshot = null;
+        renderDashboard();
+    }
 }
 
 
+// ==========================================
+// DASHBOARD ROUTER
+// ==========================================
+
+function renderDashboard() {
+    if (!username) {
+        return;
+    }
+
+    dashboardScreen.replaceChildren();
+
+    const header = document.createElement("div");
+
+    header.style.display = "flex";
+    header.style.justifyContent =
+        "space-between";
+    header.style.alignItems = "center";
+    header.style.flexWrap = "wrap";
+    header.style.gap = "12px";
+
+    const heading = element(
+        "h2",
+        "RPS ARENA"
+    );
+
+    heading.style.margin = "0";
+
+    const playerLabel = element(
+        "strong",
+        "Player: " + username
+    );
+
+    playerLabel.style.color = "#58def2";
+
+    header.appendChild(heading);
+    header.appendChild(playerLabel);
+
+    dashboardScreen.appendChild(header);
+
+    const separator = document.createElement(
+        "hr"
+    );
+
+    separator.style.border = "none";
+    separator.style.borderTop =
+        "1px solid #2a3955";
+    separator.style.margin = "20px 0";
+
+    dashboardScreen.appendChild(separator);
+
+    if (!currentState) {
+        addInfo(
+            dashboardScreen,
+            "Loading multiplayer lobby..."
+        );
+
+    } else if (
+        currentState.in_room &&
+        currentState.room
+    ) {
+        const room = currentState.room;
+        const match = currentState.match;
+
+        if (room.status === "playing") {
+            renderGame(
+                dashboardScreen,
+                room,
+                match
+            );
+
+        } else if (room.status === "finished") {
+            renderFinished(
+                dashboardScreen,
+                room,
+                match
+            );
+
+        } else {
+            renderRoom(
+                dashboardScreen,
+                room
+            );
+        }
+
+    } else {
+        renderLobby(
+            dashboardScreen,
+            currentState.rooms || []
+        );
+    }
+
+    addButton(
+        dashboardScreen,
+        "LOG OUT",
+        logout,
+        false
+    );
+}
+
+
+// ==========================================
+// AUTH FORM
+// ==========================================
+
 function updateForm() {
-    const registering = formMode === "register";
+    const registering =
+        formMode === "register";
 
     formTitle.textContent = registering
         ? "Join the arena"
@@ -127,38 +391,670 @@ function updateForm() {
 }
 
 
-switchButton.addEventListener("click", () => {
-    formMode = formMode === "login"
-        ? "register"
-        : "login";
+switchButton.addEventListener(
+    "click",
+    () => {
+        formMode = formMode === "login"
+            ? "register"
+            : "login";
 
-    passwordInput.value = "";
-    showMessage("");
-    updateForm();
-});
+        passwordInput.value = "";
+        showMessage("");
+        updateForm();
+    }
+);
 
 
-form.addEventListener("submit", async (event) => {
-    event.preventDefault();
+form.addEventListener(
+    "submit",
+    async (event) => {
+        event.preventDefault();
 
-    if (busy) {
+        if (busy) {
+            return;
+        }
+
+        const enteredUsername =
+            usernameInput.value.trim();
+
+        const password =
+            passwordInput.value;
+
+        busy = true;
+        submitButton.disabled = true;
+
+        showMessage("");
+
+        try {
+            const result = await apiRequest(
+                "/api/" + formMode,
+                {
+                    username: enteredUsername,
+                    password: password
+                }
+            );
+
+            showMessage(
+                result.message || "",
+                !result.success
+            );
+
+            if (result.success) {
+                passwordInput.value = "";
+
+                if (formMode === "register") {
+                    formMode = "login";
+                    updateForm();
+
+                } else {
+                    showDashboard(
+                        result.username ||
+                        enteredUsername
+                    );
+
+                    await refreshState();
+                }
+            }
+
+        } catch (error) {
+            showMessage(
+                "Unable to reach the web server.",
+                true
+            );
+
+        } finally {
+            busy = false;
+            submitButton.disabled = false;
+        }
+    }
+);
+
+
+// ==========================================
+// LOBBY
+// ==========================================
+
+function renderLobby(parent, rooms) {
+    addTitle(
+        parent,
+        "MULTIPLAYER LOBBY"
+    );
+
+    addInfo(
+        parent,
+        "Create a room or join another player."
+    );
+
+    addButton(
+        parent,
+        "+ CREATE ROOM",
+        createRoom
+    );
+
+    addButton(
+        parent,
+        "REFRESH ROOMS",
+        refreshState,
+        false
+    );
+
+    addTitle(
+        parent,
+        "Available Rooms"
+    );
+
+    if (rooms.length === 0) {
+        const panel = addPanel(parent);
+
+        addInfo(
+            panel,
+            "No rooms available. Create the first one!"
+        );
+
         return;
     }
 
-    const username = usernameInput.value.trim();
-    const password = passwordInput.value;
+    for (const room of rooms) {
+        const panel = addPanel(parent);
+
+        panel.appendChild(
+            element(
+                "h3",
+                room.name + " | Room #" + room.id
+            )
+        );
+
+        addInfo(
+            panel,
+            "Host: " + room.host
+        );
+
+        addInfo(
+            panel,
+            "Players: " +
+            room.player_count +
+            "/" + room.max_players
+        );
+
+        addInfo(
+            panel,
+            "Status: " +
+            room.status.toUpperCase()
+        );
+
+        const canJoin = (
+            room.status !== "playing" &&
+            room.status !== "finished" &&
+            room.player_count <
+                room.max_players
+        );
+
+        if (canJoin) {
+            addButton(
+                panel,
+                "JOIN ROOM",
+                () => performAction(
+                    "join_room",
+                    {room_id: room.id}
+                )
+            );
+        }
+    }
+}
+
+
+// ==========================================
+// WAITING ROOM
+// ==========================================
+
+function renderRoom(parent, room) {
+    addTitle(
+        parent,
+        room.name + " | Room #" + room.id
+    );
+
+    addInfo(
+        parent,
+        "Host: " + room.host
+    );
+
+    addInfo(
+        parent,
+        "Players: " +
+        room.player_count +
+        "/" + room.max_players
+    );
+
+    addTitle(
+        parent,
+        "PLAYERS"
+    );
+
+    for (const player of room.players) {
+        const panel = addPanel(parent);
+
+        const isHost =
+            player === room.host;
+
+        const ready =
+            room.ready_players.includes(player);
+
+        panel.appendChild(
+            element(
+                "strong",
+                player +
+                (isHost ? " (HOST)" : "")
+            )
+        );
+
+        addInfo(
+            panel,
+            ready ? "READY ✓" : "NOT READY",
+            ready ? "#40d7a0" : "#95a6c5"
+        );
+    }
+
+    const myReady =
+        room.ready_players.includes(username);
+
+    addButton(
+        parent,
+        myReady
+            ? "CANCEL READY"
+            : "I'M READY",
+        () => performAction(
+            myReady ? "unready" : "ready"
+        ),
+        !myReady
+    );
+
+    if (room.host === username) {
+        addButton(
+            parent,
+            "START GAME",
+            () => performAction(
+                "start_game"
+            ),
+            true,
+            !room.can_start
+        );
+
+        if (!room.can_start) {
+            addInfo(
+                parent,
+                "Start requires at least two players and everyone ready."
+            );
+        }
+    }
+
+    addButton(
+        parent,
+        "LEAVE ROOM",
+        () => performAction(
+            "leave_room"
+        ),
+        false
+    );
+}
+
+
+// ==========================================
+// SCOREBOARD
+// ==========================================
+
+function renderScoreboard(parent, scores) {
+    addTitle(parent, "🏆 SCOREBOARD");
+
+    const panel = addPanel(parent);
+
+    const ranking = Object.entries(
+        scores || {}
+    ).sort((a, b) => {
+        if (a[1] !== b[1]) {
+            return b[1] - a[1];
+        }
+
+        return a[0].localeCompare(b[0]);
+    });
+
+    let rank = 0;
+    let previousScore = null;
+
+    ranking.forEach(([player, score], index) => {
+        if (score !== previousScore) {
+            rank = index + 1;
+        }
+
+        const line = element(
+            "p",
+            "#" + rank + "  " +
+            player + "  |  " +
+            score + " points"
+        );
+
+        line.style.padding = "10px";
+        line.style.margin = "6px 0";
+        line.style.borderRadius = "8px";
+        line.style.background =
+            player === username
+                ? "#263f63"
+                : "#1b2940";
+
+        line.style.color =
+            player === username
+                ? "#58def2"
+                : "#f3f6ff";
+
+        panel.appendChild(line);
+
+        previousScore = score;
+    });
+}
+
+
+// ==========================================
+// ROUND RESULTS
+// ==========================================
+
+function renderRoundResults(parent, result) {
+    if (!result) {
+        return;
+    }
+
+    addTitle(
+        parent,
+        "ROUND " + result.round + " RESULTS"
+    );
+
+    const panel = addPanel(parent);
+
+    for (
+        const [player, move]
+        of Object.entries(result.choices || {})
+    ) {
+        const points =
+            result.points?.[player] ?? 0;
+
+        const line = element(
+            "p",
+            player + ": " +
+            move.toUpperCase() +
+            "  |  +" + points + " points"
+        );
+
+        line.style.padding = "9px";
+        line.style.margin = "5px 0";
+        line.style.color =
+            player === username
+                ? "#58def2"
+                : "#f3f6ff";
+
+        panel.appendChild(line);
+    }
+}
+
+
+// ==========================================
+// GAMEPLAY SCREEN
+// ==========================================
+
+function renderGame(parent, room, match) {
+    addTitle(
+        parent,
+        "⚔️ " + room.name
+    );
+
+    if (!match) {
+        addInfo(
+            parent,
+            "Preparing match..."
+        );
+
+        return;
+    }
+
+    const isTiebreaker =
+        match.round > match.total_rounds;
+
+    const roundText =
+        "ROUND " + match.round +
+        (isTiebreaker ? " | TIEBREAKER" : "");
+
+    addTitle(parent, roundText);
+
+    const timer = element(
+        "h2",
+        "⏱ " + match.remaining + " seconds"
+    );
+
+    timer.style.color =
+        match.remaining <= 5
+            ? "#ff727e"
+            : "#40d7a0";
+
+    timer.style.fontSize = "32px";
+
+    parent.appendChild(timer);
+
+    renderScoreboard(
+        parent,
+        match.scores
+    );
+
+    if (match.phase === "results") {
+        addTitle(
+            parent,
+            "ROUND COMPLETE"
+        );
+
+        renderRoundResults(
+            parent,
+            match.last_result
+        );
+
+        addInfo(
+            parent,
+            "Next round starts automatically."
+        );
+
+    } else if (match.phase === "choosing") {
+        const panel = addPanel(parent);
+
+        panel.appendChild(
+            element(
+                "h3",
+                "CHOOSE YOUR MOVE"
+            )
+        );
+
+        if (match.my_choice) {
+            addInfo(
+                panel,
+                "✓ You selected: " +
+                match.my_choice.toUpperCase(),
+                "#40d7a0"
+            );
+
+            addInfo(
+                panel,
+                "Waiting for the other players..."
+            );
+
+        } else {
+            const moves = [
+                {
+                    name: "rock",
+                    label: "🪨 ROCK"
+                },
+                {
+                    name: "paper",
+                    label: "📄 PAPER"
+                },
+                {
+                    name: "scissors",
+                    label: "✂️ SCISSORS"
+                }
+            ];
+
+            for (const move of moves) {
+                addButton(
+                    panel,
+                    move.label,
+                    () => chooseMove(
+                        move.name,
+                        match.round
+                    ),
+                    true,
+                    busy || match.remaining <= 0
+                );
+            }
+        }
+
+        addInfo(
+            parent,
+            "Submitted: " +
+            match.submitted.length +
+            "/" + match.players.length +
+            " players"
+        );
+
+        for (const player of match.players) {
+            const submitted =
+                match.submitted.includes(player);
+
+            addInfo(
+                parent,
+                player + ": " +
+                (
+                    submitted
+                        ? "Submitted ✓"
+                        : "Choosing..."
+                ),
+                submitted
+                    ? "#40d7a0"
+                    : "#AEC0D7"
+            );
+        }
+    }
+
+    addButton(
+        parent,
+        "LEAVE MATCH",
+        () => performAction(
+            "leave_room"
+        ),
+        false
+    );
+}
+
+
+// ==========================================
+// FINAL RESULTS
+// ==========================================
+
+function renderFinished(parent, room, match) {
+    addTitle(
+        parent,
+        "🏆 MATCH FINISHED"
+    );
+
+    if (!match) {
+        addInfo(
+            parent,
+            "Loading final results..."
+        );
+
+        return;
+    }
+
+    const winners = match.winners || [];
+
+    const winnerText = match.draw
+        ? "DRAW: " + winners.join(", ")
+        : "WINNER: " + winners.join(", ");
+
+    const winnerTitle = element(
+        "h2",
+        winnerText
+    );
+
+    winnerTitle.style.color = "#40d7a0";
+    winnerTitle.style.marginTop = "24px";
+
+    parent.appendChild(winnerTitle);
+
+    addInfo(
+        parent,
+        "Rounds played: " + match.round
+    );
+
+    renderScoreboard(
+        parent,
+        match.scores
+    );
+
+    renderRoundResults(
+        parent,
+        match.last_result
+    );
+
+    if (room.host === username) {
+        addButton(
+            parent,
+            "🔄 PLAY AGAIN",
+            () => performAction(
+                "reset_match"
+            )
+        );
+    } else {
+        addInfo(
+            parent,
+            "Waiting for the host to start a new match."
+        );
+    }
+
+    addButton(
+        parent,
+        "LEAVE ROOM",
+        () => performAction(
+            "leave_room"
+        ),
+        false
+    );
+}
+
+
+// ==========================================
+// GAME MOVE
+// ==========================================
+
+async function chooseMove(move, roundNumber) {
+    await performAction(
+        "choose",
+        {
+            move: move,
+            round: roundNumber
+        }
+    );
+}
+
+
+// ==========================================
+// CREATE ROOM
+// ==========================================
+
+async function createRoom() {
+    const roomName = window.prompt(
+        "Enter a room name (1-30 characters):"
+    );
+
+    if (roomName === null) {
+        return;
+    }
+
+    const cleanedName = roomName.trim();
+
+    if (
+        cleanedName.length < 1 ||
+        cleanedName.length > 30
+    ) {
+        showMessage(
+            "Room name must be 1-30 characters.",
+            true
+        );
+
+        return;
+    }
+
+    await performAction(
+        "create_room",
+        {
+            room_name: cleanedName
+        }
+    );
+}
+
+
+// ==========================================
+// SEND GAME ACTION
+// ==========================================
+
+async function performAction(
+    action,
+    payload = {}
+) {
+    if (busy || !username) {
+        return;
+    }
 
     busy = true;
-    submitButton.disabled = true;
-
-    showMessage("");
 
     try {
         const result = await apiRequest(
-            "/api/" + formMode,
+            "/api/action",
             {
-                username: username,
-                password: password
+                action,
+                ...payload
             }
         );
 
@@ -168,80 +1064,201 @@ form.addEventListener("submit", async (event) => {
         );
 
         if (result.success) {
-            passwordInput.value = "";
+            lastSnapshot = null;
 
-            if (formMode === "register") {
-                formMode = "login";
-                updateForm();
-            } else {
-                showDashboard(result.username || username);
-            }
+            await refreshState();
         }
 
     } catch (error) {
         showMessage(
-            "Unable to connect to the web server.",
+            "Unable to perform this action.",
             true
         );
 
     } finally {
         busy = false;
-        submitButton.disabled = false;
     }
-});
+}
 
 
-logoutButton.addEventListener("click", async () => {
-    if (busy) {
+// ==========================================
+// LIVE STATE POLLING
+// ==========================================
+
+async function refreshState() {
+    if (!username || stateBusy) {
         return;
     }
 
-    busy = true;
-    logoutButton.disabled = true;
+    stateBusy = true;
 
     try {
-        await apiRequest("/api/logout", {});
-        showLoginScreen();
-        showMessage("Logged out successfully.");
-
-    } catch (error) {
-        showMessage("Unable to log out.", true);
-
-    } finally {
-        busy = false;
-        logoutButton.disabled = false;
-    }
-});
-
-
-async function checkStatus() {
-    try {
-        const result = await apiRequest("/api/status");
+        const result = await apiRequest(
+            "/api/state"
+        );
 
         if (!result.success) {
-            showLoginScreen();
+            showMessage(
+                result.message ||
+                "Unable to load game state.",
+                true
+            );
 
-            if (result.message) {
-                showMessage(result.message, true);
+            if (
+                result.message &&
+                (
+                    result.message.includes(
+                        "log in"
+                    ) ||
+                    result.message.includes(
+                        "connection lost"
+                    )
+                )
+            ) {
+                showLoginScreen();
             }
 
             return;
         }
 
-        if (result.logged_in) {
-            showDashboard(result.username);
+        const snapshot = JSON.stringify({
+            in_room: result.in_room,
+            room: result.room,
+            rooms: result.rooms,
+            match: result.match
+        });
+
+        currentState = result;
+
+        if (
+            result.notice &&
+            result.notice !== lastNotice
+        ) {
+            lastNotice = result.notice;
+
+            showMessage(
+                result.notice,
+                true
+            );
+        }
+
+        if (snapshot !== lastSnapshot) {
+            lastSnapshot = snapshot;
+
+            renderDashboard();
+        }
+
+    } catch (error) {
+        showMessage(
+            "Game connection unavailable.",
+            true
+        );
+
+    } finally {
+        stateBusy = false;
+    }
+}
+
+
+// ==========================================
+// LOGOUT
+// ==========================================
+
+async function logout() {
+    if (busy) {
+        return;
+    }
+
+    busy = true;
+
+    try {
+        const result = await apiRequest(
+            "/api/logout",
+            {}
+        );
+
+        if (result.success) {
+            showLoginScreen();
+
+            showMessage(
+                "Logged out successfully."
+            );
         } else {
+            showMessage(
+                result.message || "Logout failed.",
+                true
+            );
+        }
+
+    } catch (error) {
+        showMessage(
+            "Unable to log out.",
+            true
+        );
+
+    } finally {
+        busy = false;
+    }
+}
+
+
+// ==========================================
+// CHECK LOGIN SESSION
+// ==========================================
+
+async function checkStatus() {
+    try {
+        const result = await apiRequest(
+            "/api/status"
+        );
+
+        if (!result.success) {
+            showLoginScreen();
+
+            showMessage(
+                result.message ||
+                "Game server unavailable.",
+                true
+            );
+
+            return;
+        }
+
+        if (result.logged_in) {
+            showDashboard(
+                result.username
+            );
+
+            if (!currentState) {
+                await refreshState();
+            }
+
+        } else if (username !== null) {
             showLoginScreen();
         }
 
     } catch (error) {
         connectionIndicator.textContent =
-            "Web server connection unavailable";
+            "Web server unavailable";
     }
 }
 
 
+// ==========================================
+// START APPLICATION
+// ==========================================
+
 updateForm();
 checkStatus();
 
-setInterval(checkStatus, 5000);
+// Check session every five seconds.
+setInterval(
+    checkStatus,
+    5000
+);
+
+// Update gameplay, timer and lobby every second.
+setInterval(
+    refreshState,
+    1000
+);
