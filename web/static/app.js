@@ -1,42 +1,20 @@
 
 /*
-==========================================
 RPS ARENA WEB CLIENT
-Login, Lobby, Gameplay, Browser Presence
-==========================================
+Gameplay + Browser Presence + HTTPS Network Monitor
 */
 
-const authScreen = document.getElementById(
-    "auth-screen"
-);
-const dashboardScreen = document.getElementById(
-    "dashboard-screen"
-);
+const authScreen = document.getElementById("auth-screen");
+const dashboardScreen = document.getElementById("dashboard-screen");
 const form = document.getElementById("auth-form");
-const formTitle = document.getElementById(
-    "form-title"
-);
-const formDescription = document.getElementById(
-    "form-description"
-);
-const usernameInput = document.getElementById(
-    "username"
-);
-const passwordInput = document.getElementById(
-    "password"
-);
-const submitButton = document.getElementById(
-    "submit-button"
-);
-const switchButton = document.getElementById(
-    "switch-button"
-);
-const switchPrompt = document.getElementById(
-    "switch-prompt"
-);
-const messageBox = document.getElementById(
-    "message"
-);
+const formTitle = document.getElementById("form-title");
+const formDescription = document.getElementById("form-description");
+const usernameInput = document.getElementById("username");
+const passwordInput = document.getElementById("password");
+const submitButton = document.getElementById("submit-button");
+const switchButton = document.getElementById("switch-button");
+const switchPrompt = document.getElementById("switch-prompt");
+const messageBox = document.getElementById("message");
 const connectionIndicator = document.getElementById(
     "connection-indicator"
 );
@@ -65,7 +43,235 @@ if (!tabId) {
 
 
 // ==========================================
-// NETWORK
+// HTTPS NETWORK MONITOR
+// ==========================================
+
+const PROBE_INTERVAL_MS = 3000;
+const PROBE_TIMEOUT_MS = 3000;
+const MAX_PROBES = 30;
+
+let probeBusy = false;
+let probeSamples = [];
+let probeGeneration = 0;
+let probeSequence = 0;
+
+function resetNetworkMonitor() {
+    probeGeneration++;
+    probeSamples = [];
+    probeBusy = false;
+}
+
+function calculateNetworkMetrics() {
+    const successful = probeSamples.filter(
+        sample => sample !== null
+    );
+
+    const lost = probeSamples.length - successful.length;
+
+    const loss = probeSamples.length
+        ? (lost / probeSamples.length) * 100
+        : null;
+
+    const variations = [];
+
+    for (let i = 1; i < successful.length; i++) {
+        variations.push(
+            Math.abs(successful[i] - successful[i - 1])
+        );
+    }
+
+    const jitter = variations.length
+        ? variations.reduce((a, b) => a + b, 0) /
+          variations.length
+        : null;
+
+    return {
+        ping: probeSamples.length
+            ? probeSamples[probeSamples.length - 1]
+            : null,
+        loss,
+        jitter,
+        probes: probeSamples.length
+    };
+}
+
+function metricText(value, unit = "") {
+    return value === null
+        ? "--"
+        : value.toFixed(1) + unit;
+}
+
+function createNetworkMonitor() {
+    const monitor = document.createElement("div");
+    monitor.id = "https-network-monitor";
+
+    monitor.style.boxSizing = "border-box";
+    monitor.style.background = "#1b2940";
+    monitor.style.border = "1px solid #35527b";
+    monitor.style.borderRadius = "18px";
+    monitor.style.padding = "14px 16px";
+    monitor.style.width = "min(100%, 470px)";
+    monitor.style.maxWidth = "100%";
+    monitor.style.flex = "0 1 470px";
+    monitor.style.fontFamily = "inherit";
+
+    const title = document.createElement("div");
+    title.textContent = "HTTPS NETWORK MONITOR:";
+    title.style.color = "#58def2";
+    title.style.fontWeight = "800";
+    title.style.fontSize = "13px";
+    title.style.letterSpacing = "0.5px";
+    title.style.marginBottom = "10px";
+
+    monitor.appendChild(title);
+
+    const metrics = document.createElement("div");
+    metrics.style.display = "flex";
+    metrics.style.flexWrap = "wrap";
+    metrics.style.alignItems = "center";
+    metrics.style.gap = "6px 10px";
+    metrics.style.fontSize = "12px";
+    metrics.style.color = "#f2f6fc";
+    metrics.style.fontWeight = "600";
+
+    for (const [key, label] of [
+        ["ping", "Ping"],
+        ["loss", "Loss"],
+        ["jitter", "Jitter"],
+        ["probes", "Probes"]
+    ]) {
+        const item = document.createElement("span");
+
+        const name = document.createElement("span");
+        name.textContent = label + ": ";
+        name.style.color = "#aec0d7";
+
+        const value = document.createElement("span");
+        value.id = "monitor-" + key;
+        value.textContent = "--";
+
+        item.appendChild(name);
+        item.appendChild(value);
+        metrics.appendChild(item);
+    }
+
+    monitor.appendChild(metrics);
+
+    const description = document.createElement("div");
+    description.textContent =
+        "HTTPS request timing · Last 30 probes";
+    description.style.fontSize = "10px";
+    description.style.color = "#95a6c5";
+    description.style.marginTop = "9px";
+
+    monitor.appendChild(description);
+
+    updateNetworkMonitor(monitor);
+    return monitor;
+}
+
+function updateNetworkMonitor(container = null) {
+    const root = container || document.getElementById(
+        "https-network-monitor"
+    );
+
+    if (!root) {
+        return;
+    }
+
+    const metrics = calculateNetworkMetrics();
+
+    const values = {
+        ping: metricText(metrics.ping, " ms"),
+        loss: metricText(metrics.loss, "%"),
+        jitter: metricText(metrics.jitter, " ms"),
+        probes: String(metrics.probes)
+    };
+
+    for (const [key, value] of Object.entries(values)) {
+        const node = root.querySelector(
+            "#monitor-" + key
+        );
+
+        if (node) {
+            node.textContent = value;
+        }
+    }
+}
+
+async function runNetworkProbe() {
+    if (!username || probeBusy) {
+        return;
+    }
+
+    probeBusy = true;
+
+    const generation = probeGeneration;
+    const player = username;
+    const controller = new AbortController();
+
+    // AbortController prevents a request from
+    // blocking the monitor indefinitely.
+    const timeoutId = setTimeout(
+        () => controller.abort(),
+        PROBE_TIMEOUT_MS
+    );
+
+    const start = performance.now();
+    let sample = null;
+
+    try {
+        probeSequence++;
+
+        const response = await fetch(
+            "/api/status?network_probe=" + probeSequence,
+            {
+                method: "GET",
+                credentials: "same-origin",
+                cache: "no-store",
+                signal: controller.signal,
+                headers: {
+                    "Accept": "application/json"
+                }
+            }
+        );
+
+        const result = await response.json();
+
+        if (
+            response.ok &&
+            result.success === true &&
+            result.logged_in === true
+        ) {
+            sample = performance.now() - start;
+        }
+
+    } catch (error) {
+        // Failed or timed-out request.
+        // It counts as a failed HTTPS probe,
+        // not necessarily actual packet loss.
+    } finally {
+        clearTimeout(timeoutId);
+
+        if (
+            generation === probeGeneration &&
+            username === player
+        ) {
+            probeSamples.push(sample);
+
+            if (probeSamples.length > MAX_PROBES) {
+                probeSamples.shift();
+            }
+
+            updateNetworkMonitor();
+            probeBusy = false;
+        }
+    }
+}
+
+
+// ==========================================
+// NETWORK REQUESTS
 // ==========================================
 
 async function apiRequest(path, data = null) {
@@ -85,14 +291,12 @@ async function apiRequest(path, data = null) {
     }
 
     const response = await fetch(path, options);
-    const result = await response.json();
-
-    return result;
+    return response.json();
 }
 
 
 // ==========================================
-// BROWSER PRESENCE
+// BROWSER SESSION PRESENCE
 // ==========================================
 
 async function sendPresence() {
@@ -110,11 +314,9 @@ async function sendPresence() {
             await checkStatus();
         }
     } catch (error) {
-        // Temporary network problems are handled
-        // by the server's inactivity timeout.
+        // The server has an inactivity timeout.
     }
 }
-
 
 function notifyBrowserClosing() {
     if (!username) {
@@ -126,38 +328,25 @@ function notifyBrowserClosing() {
         {type: "application/json"}
     );
 
-    navigator.sendBeacon(
-        "/api/browser-leave",
-        data
-    );
+    navigator.sendBeacon("/api/browser-leave", data);
 }
 
-
-// A refresh also triggers pagehide.
-// The server waits 4 seconds so the
-// refreshed page can renew its session.
 window.addEventListener(
     "pagehide",
     notifyBrowserClosing
 );
 
-window.addEventListener(
-    "pageshow",
-    () => {
-        if (username) {
-            sendPresence();
-        }
+window.addEventListener("pageshow", () => {
+    if (username) {
+        sendPresence();
     }
-);
+});
 
-window.addEventListener(
-    "focus",
-    () => {
-        if (username) {
-            sendPresence();
-        }
+window.addEventListener("focus", () => {
+    if (username) {
+        sendPresence();
     }
-);
+});
 
 
 // ==========================================
@@ -178,7 +367,7 @@ function showMessage(text, isError = false) {
 
 
 // ==========================================
-// ELEMENT HELPERS
+// GUI HELPERS
 // ==========================================
 
 function element(tag, text = "") {
@@ -186,7 +375,6 @@ function element(tag, text = "") {
     node.textContent = String(text);
     return node;
 }
-
 
 function addInfo(parent, text, color = "#AEC0D7") {
     const node = element("p", text);
@@ -196,14 +384,12 @@ function addInfo(parent, text, color = "#AEC0D7") {
     return node;
 }
 
-
 function addTitle(parent, text) {
     const node = element("h3", text);
     node.style.marginTop = "24px";
     parent.appendChild(node);
     return node;
 }
-
 
 function addPanel(parent) {
     const node = document.createElement("div");
@@ -217,7 +403,6 @@ function addPanel(parent) {
     parent.appendChild(node);
     return node;
 }
-
 
 function addButton(
     parent,
@@ -249,6 +434,10 @@ function addButton(
 // ==========================================
 
 function showLoginScreen() {
+    if (username !== null) {
+        resetNetworkMonitor();
+    }
+
     username = null;
     currentState = null;
     lastSnapshot = null;
@@ -261,9 +450,12 @@ function showLoginScreen() {
         "RPS Arena Web | Local test";
 }
 
-
 function showDashboard(playerUsername) {
     const changed = username !== playerUsername;
+
+    if (changed) {
+        resetNetworkMonitor();
+    }
 
     username = playerUsername;
 
@@ -271,9 +463,8 @@ function showDashboard(playerUsername) {
     dashboardScreen.classList.remove("hidden");
 
     dashboardScreen.style.width =
-        "min(100%, 760px)";
-
-    dashboardScreen.style.maxWidth = "760px";
+        "min(100%, 900px)";
+    dashboardScreen.style.maxWidth = "900px";
     dashboardScreen.style.textAlign = "left";
 
     connectionIndicator.textContent =
@@ -283,12 +474,13 @@ function showDashboard(playerUsername) {
         lastSnapshot = null;
         renderDashboard();
         sendPresence();
+        runNetworkProbe();
     }
 }
 
 
 // ==========================================
-// MAIN SCREEN ROUTER
+// DASHBOARD
 // ==========================================
 
 function renderDashboard() {
@@ -299,11 +491,15 @@ function renderDashboard() {
     dashboardScreen.replaceChildren();
 
     const header = document.createElement("div");
+
     header.style.display = "flex";
     header.style.justifyContent = "space-between";
-    header.style.alignItems = "center";
+    header.style.alignItems = "flex-start";
     header.style.flexWrap = "wrap";
-    header.style.gap = "12px";
+    header.style.gap = "16px";
+
+    const identity = document.createElement("div");
+    identity.style.flex = "1 1 170px";
 
     const heading = element("h2", "RPS ARENA");
     heading.style.margin = "0";
@@ -313,15 +509,22 @@ function renderDashboard() {
         "Player: " + username
     );
     playerName.style.color = "#58def2";
+    playerName.style.display = "block";
+    playerName.style.marginTop = "8px";
 
-    header.appendChild(heading);
-    header.appendChild(playerName);
+    identity.appendChild(heading);
+    identity.appendChild(playerName);
+
+    header.appendChild(identity);
+    header.appendChild(createNetworkMonitor());
+
     dashboardScreen.appendChild(header);
 
     const separator = document.createElement("hr");
     separator.style.border = "none";
     separator.style.borderTop = "1px solid #2a3955";
     separator.style.margin = "20px 0";
+
     dashboardScreen.appendChild(separator);
 
     if (!currentState) {
@@ -340,7 +543,9 @@ function renderDashboard() {
             renderGame(dashboardScreen, room, match);
         } else if (room.status === "finished") {
             renderFinished(
-                dashboardScreen, room, match
+                dashboardScreen,
+                room,
+                match
             );
         } else {
             renderRoom(dashboardScreen, room);
@@ -393,7 +598,6 @@ function updateForm() {
         : "current-password";
 }
 
-
 switchButton.addEventListener("click", () => {
     formMode = formMode === "login"
         ? "register"
@@ -403,7 +607,6 @@ switchButton.addEventListener("click", () => {
     showMessage("");
     updateForm();
 });
-
 
 form.addEventListener("submit", async event => {
     event.preventDefault();
@@ -426,7 +629,7 @@ form.addEventListener("submit", async event => {
             "/api/" + formMode,
             {
                 username: enteredUsername,
-                password: password
+                password
             }
         );
 
@@ -449,11 +652,13 @@ form.addEventListener("submit", async event => {
                 await refreshState();
             }
         }
+
     } catch (error) {
         showMessage(
             "Unable to reach the web server.",
             true
         );
+
     } finally {
         busy = false;
         submitButton.disabled = false;
@@ -495,6 +700,7 @@ function renderLobby(parent, rooms) {
             panel,
             "No rooms available. Create the first one!"
         );
+
         return;
     }
 
@@ -803,7 +1009,7 @@ function renderGame(parent, room, match) {
                     () => performAction(
                         "choose",
                         {
-                            move: move,
+                            move,
                             round: match.round
                         }
                     ),
@@ -928,6 +1134,7 @@ async function createRoom() {
             "Room name must be 1-30 characters.",
             true
         );
+
         return;
     }
 
@@ -981,7 +1188,7 @@ async function performAction(action, payload = {}) {
 
 
 // ==========================================
-// LIVE STATE UPDATES
+// LIVE GAME STATE
 // ==========================================
 
 async function refreshState() {
@@ -1069,6 +1276,7 @@ async function logout() {
 
         if (result.success) {
             showLoginScreen();
+
             showMessage(
                 "Logged out successfully."
             );
@@ -1092,7 +1300,7 @@ async function logout() {
 
 
 // ==========================================
-// SESSION CHECK
+// SESSION STATUS
 // ==========================================
 
 async function checkStatus() {
@@ -1132,17 +1340,20 @@ async function checkStatus() {
 
 
 // ==========================================
-// INITIALIZE
+// START
 // ==========================================
 
 updateForm();
 checkStatus();
 
-// Keep the browser session active.
+// Browser presence checks.
 setInterval(sendPresence, 2000);
 
-// Check authentication status.
+// Authentication checks.
 setInterval(checkStatus, 5000);
 
-// Update game and lobby.
+// Game and lobby updates.
 setInterval(refreshState, 1000);
+
+// HTTPS network measurements.
+setInterval(runNetworkProbe, PROBE_INTERVAL_MS);
