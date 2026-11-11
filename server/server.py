@@ -18,6 +18,8 @@ from pathlib import Path
 HOST = os.environ.get("RPS_BIND_HOST", "127.0.0.1")
 TCP_PORT = 5000
 UDP_PORT = 5001
+COUNTDOWN_PORT = 5003
+CHAT_PORT = 5002
 
 MIN_PLAYERS = 2
 MAX_PLAYERS = 4
@@ -255,6 +257,7 @@ def beats(a, b):
 
 def create_match(players):
     return {
+        "id": secrets.token_hex(12),
         "players": list(players),
         "round": 1,
         "phase": "choosing",
@@ -450,6 +453,7 @@ def game_state(username):
         )
 
     data["match"] = {
+        "id": match["id"],
         "round": match["round"],
         "total_rounds": TOTAL_ROUNDS,
         "phase": match["phase"],
@@ -855,6 +859,228 @@ def udp_worker():
                 print(f"[UDP ERROR] {exc}")
 
 
+
+# ==========================================
+# UDP COUNTDOWN SERVICE - PORT 5003
+# ==========================================
+
+def countdown_worker():
+    # Independent from UDP heartbeats on port 5001.
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+        udp.bind((HOST, COUNTDOWN_PORT))
+        udp.settimeout(0.2)
+
+        print(f"[UDP COUNTDOWN] Listening on {HOST}:{COUNTDOWN_PORT}")
+
+        next_broadcast = 0.0
+        sequence = 0
+
+        while True:
+            try:
+                data, address = udp.recvfrom(2048)
+                message = json.loads(data.decode("utf-8"))
+
+                if (
+                    isinstance(message, dict)
+                    and message.get("type") == "countdown_register"
+                ):
+                    token = message.get("token")
+
+                    if isinstance(token, str) and len(token) == 64:
+                        with state_lock:
+                            for username, player_session in sessions.items():
+                                if hmac.compare_digest(
+                                    player_session["token"], token
+                                ):
+                                    player_session["countdown_addr"] = address
+                                    player_session["countdown_seen"] = (
+                                        time.monotonic()
+                                    )
+                                    break
+
+            except socket.timeout:
+                pass
+
+            except (ValueError, UnicodeError, OSError) as exc:
+                print(f"[UDP COUNTDOWN ERROR] {exc}")
+
+            now = time.monotonic()
+
+            if now < next_broadcast:
+                continue
+
+            next_broadcast = now + 1.0
+            sequence += 1
+            packets = []
+
+            with state_lock:
+                for room_id, room in rooms.items():
+                    match = room.get("match")
+
+                    if room["status"] != "playing" or match is None:
+                        continue
+
+                    if match["phase"] != "choosing":
+                        continue
+
+                    remaining = max(
+                        0,
+                        int(match["deadline"] - now + 0.999)
+                    )
+
+                    payload = json.dumps({
+                        "type": "countdown",
+                        "match_id": match["id"],
+                        "room_id": room_id,
+                        "round": match["round"],
+                        "remaining": remaining,
+                        "seq": sequence
+                    }).encode("utf-8")
+
+                    for username in room["players"]:
+                        player_session = sessions.get(username)
+
+                        if not player_session:
+                            continue
+
+                        address = player_session.get("countdown_addr")
+
+                        fresh = (
+                            now - player_session.get("countdown_seen", 0)
+                            < 10
+                        )
+
+                        if address and fresh:
+                            packets.append((payload, address))
+
+            # Send outside the game-state lock.
+            for payload, address in packets:
+                try:
+                    udp.sendto(payload, address)
+                except OSError:
+                    pass
+
+
+
+# ==========================================
+# UDP ROOM CHAT (PORT 5002)
+# ==========================================
+
+def chat_worker():
+    # Independent UDP socket.
+    # Validate session tokens and room membership.
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+        udp.bind((HOST, CHAT_PORT))
+        udp.settimeout(0.5)
+
+        print(f"[UDP CHAT] Listening on {HOST}:{CHAT_PORT}")
+
+        while True:
+            try:
+                data, address = udp.recvfrom(2048)
+                message = json.loads(data.decode("utf-8"))
+
+                if not isinstance(message, dict):
+                    continue
+
+                packet_type = message.get("type")
+
+                if packet_type not in ("chat_register", "room_chat"):
+                    continue
+
+                token = message.get("token")
+
+                if not isinstance(token, str) or len(token) != 64:
+                    continue
+
+                now = time.monotonic()
+                targets = []
+                outgoing = None
+
+                with state_lock:
+                    sender = None
+                    sender_session = None
+
+                    for username, player_session in sessions.items():
+                        if hmac.compare_digest(
+                            player_session["token"], token
+                        ):
+                            sender = username
+                            sender_session = player_session
+                            break
+
+                    if sender_session is None:
+                        continue
+
+                    if packet_type == "chat_register":
+                        sender_session["chat_addr"] = address
+                        sender_session["chat_seen"] = now
+                        continue
+
+                    if address != sender_session.get("chat_addr"):
+                        continue
+
+                    if now - sender_session.get("chat_seen", 0) > 12:
+                        continue
+
+                    text = message.get("text")
+
+                    if not isinstance(text, str):
+                        continue
+
+                    text = text.strip()
+
+                    if not text or len(text) > 200 or "\x00" in text:
+                        continue
+
+                    if now - sender_session.get("chat_sent", 0) < 0.4:
+                        continue
+
+                    room_id = find_room(sender)
+
+                    if room_id is None:
+                        continue
+
+                    room = rooms[room_id]
+                    sender_session["chat_sent"] = now
+
+                    outgoing = json.dumps({
+                        "type": "room_chat",
+                        "room_id": room_id,
+                        "from": sender,
+                        "text": text
+                    }).encode("utf-8")
+
+                    for player in room["players"]:
+                        recipient = sessions.get(player)
+
+                        if not recipient:
+                            continue
+
+                        if now - recipient.get("chat_seen", 0) > 12:
+                            continue
+
+                        recipient_address = recipient.get("chat_addr")
+
+                        if recipient_address:
+                            targets.append(recipient_address)
+
+                # UDP send outside the game-state lock.
+                for destination in targets:
+                    try:
+                        udp.sendto(outgoing, destination)
+                    except OSError:
+                        pass
+
+                print(f"[UDP CHAT] {sender} in room {room_id}")
+
+            except socket.timeout:
+                continue
+
+            except (ValueError, UnicodeError, OSError) as exc:
+                print(f"[UDP CHAT ERROR] {exc}")
+
+
 # ==========================================
 # TCP SERVER
 # ==========================================
@@ -959,7 +1185,12 @@ def handle_client(connection, address):
                                         "token": token,
                                         "last_tcp": now,
                                         "last_udp": now,
-                                        "udp_count": 0
+                                        "udp_count": 0,
+                                        "countdown_addr": None,
+                                        "countdown_seen": 0.0,
+                                        "chat_addr": None,
+                                        "chat_seen": 0.0,
+                                        "chat_sent": 0.0
                                     }
 
                                     username = wanted
@@ -967,7 +1198,9 @@ def handle_client(connection, address):
                                     response = ok(
                                         f"Welcome, {wanted}!",
                                         heartbeat_token=token,
-                                        udp_port=UDP_PORT
+                                        udp_port=UDP_PORT,
+                                        countdown_port=COUNTDOWN_PORT,
+                                        chat_port=CHAT_PORT
                                     )
 
                             if response["success"]:
@@ -1047,7 +1280,9 @@ def start_server():
     for worker in (
         timer_worker,
         timeout_worker,
-        udp_worker
+        udp_worker,
+        countdown_worker,
+        chat_worker
     ):
         threading.Thread(
             target=worker,
@@ -1074,6 +1309,8 @@ def start_server():
         print(f"Server address: {HOST}")
         print(f"TCP game port: {TCP_PORT}")
         print(f"UDP heartbeat port: {UDP_PORT}")
+        print(f"UDP countdown port: {COUNTDOWN_PORT}")
+        print(f"UDP room chat port: {CHAT_PORT}")
         print(f"Room capacity: {MIN_PLAYERS}-{MAX_PLAYERS}")
         print(f"Round timer: {ROUND_SECONDS} seconds")
         print("[STATUS] Server online")

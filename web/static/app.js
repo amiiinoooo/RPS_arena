@@ -1357,3 +1357,441 @@ setInterval(refreshState, 1000);
 
 // HTTPS network measurements.
 setInterval(runNetworkProbe, PROBE_INTERVAL_MS);
+
+
+
+// ==========================================
+// BROWSER ROOM CHAT THROUGH UDP PORT 5002
+// Collapsible chat window
+// ==========================================
+
+(() => {
+    let currentRoomId = null;
+    let lastMessageId = 0;
+
+    let panel = null;
+    let launcher = null;
+    let lines = null;
+    let field = null;
+
+    let minimized = false;
+    let polling = false;
+    let sending = false;
+
+    function removeChat() {
+        if (panel) {
+            panel.remove();
+        }
+
+        if (launcher) {
+            launcher.remove();
+        }
+
+        panel = null;
+        launcher = null;
+        lines = null;
+        field = null;
+
+        currentRoomId = null;
+        lastMessageId = 0;
+        minimized = false;
+    }
+
+    function minimizeChat() {
+        minimized = true;
+
+        if (panel) {
+            panel.style.display = "none";
+        }
+
+        if (launcher) {
+            launcher.style.display = "flex";
+        }
+    }
+
+    function expandChat() {
+        minimized = false;
+
+        if (launcher) {
+            launcher.style.display = "none";
+        }
+
+        if (panel) {
+            panel.style.display = "flex";
+        }
+
+        if (lines) {
+            lines.scrollTop = lines.scrollHeight;
+        }
+
+        if (field) {
+            field.focus();
+        }
+    }
+
+    function appendLine(sender, message) {
+        if (!lines) {
+            return;
+        }
+
+        const line = document.createElement("div");
+        line.style.margin = "7px 0";
+        line.style.overflowWrap = "anywhere";
+
+        const name = document.createElement("strong");
+        name.textContent = sender + ": ";
+        name.style.color = "#58def2";
+
+        line.appendChild(name);
+        line.appendChild(
+            document.createTextNode(message)
+        );
+
+        lines.appendChild(line);
+
+        while (lines.children.length > 80) {
+            lines.firstChild.remove();
+        }
+
+        lines.scrollTop = lines.scrollHeight;
+    }
+
+    async function sendMessage() {
+        if (
+            !field ||
+            sending ||
+            currentRoomId === null
+        ) {
+            return;
+        }
+
+        const text = field.value.trim();
+
+        if (!text || text.length > 200) {
+            return;
+        }
+
+        sending = true;
+
+        try {
+            const response = await fetch(
+                "/api/chat/send",
+                {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({text})
+                }
+            );
+
+            const data = await response.json();
+
+            if (data.success) {
+                field.value = "";
+            } else {
+                appendLine(
+                    "System",
+                    data.message || "Message not sent"
+                );
+            }
+
+        } catch (error) {
+            appendLine(
+                "System",
+                "Chat connection unavailable"
+            );
+
+        } finally {
+            sending = false;
+        }
+    }
+
+    function createChat(roomId) {
+        removeChat();
+
+        currentRoomId = roomId;
+
+        // ==================================
+        // EXPANDED CHAT WINDOW
+        // ==================================
+
+        panel = document.createElement("section");
+        panel.id = "browser-udp-room-chat";
+
+        Object.assign(panel.style, {
+            position: "fixed",
+            right: "16px",
+            bottom: "16px",
+            width: "min(360px, calc(100vw - 32px))",
+            height: "340px",
+            display: "flex",
+            flexDirection: "column",
+            background: "#1b2940",
+            color: "#f2f6fc",
+            border: "1px solid #35527b",
+            borderRadius: "16px",
+            padding: "14px",
+            zIndex: "1000",
+            boxSizing: "border-box",
+            boxShadow: "0 8px 32px #0008",
+            fontFamily: "inherit"
+        });
+
+        // ==================================
+        // HEADER WITH MINIMIZE BUTTON
+        // ==================================
+
+        const header = document.createElement("div");
+
+        Object.assign(header.style, {
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: "12px"
+        });
+
+        const heading = document.createElement("strong");
+        heading.textContent = "ROOM CHAT | UDP 5002";
+        heading.style.color = "#58def2";
+        heading.style.fontSize = "14px";
+
+        const minimizeButton = document.createElement("button");
+        minimizeButton.type = "button";
+        minimizeButton.textContent = "×";
+        minimizeButton.title = "Minimize chat";
+        minimizeButton.setAttribute(
+            "aria-label",
+            "Minimize room chat"
+        );
+
+        Object.assign(minimizeButton.style, {
+            background: "#253650",
+            color: "#f2f6fc",
+            border: "none",
+            borderRadius: "8px",
+            width: "30px",
+            height: "30px",
+            fontSize: "22px",
+            cursor: "pointer",
+            lineHeight: "1"
+        });
+
+        minimizeButton.addEventListener(
+            "click",
+            minimizeChat
+        );
+
+        header.appendChild(heading);
+        header.appendChild(minimizeButton);
+        panel.appendChild(header);
+
+        // ==================================
+        // CHAT MESSAGES
+        // ==================================
+
+        lines = document.createElement("div");
+
+        Object.assign(lines.style, {
+            flex: "1",
+            minHeight: "0",
+            overflowY: "auto",
+            fontSize: "13px",
+            background: "#101827",
+            borderRadius: "9px",
+            padding: "10px",
+            lineHeight: "1.5"
+        });
+
+        panel.appendChild(lines);
+
+        // ==================================
+        // MESSAGE INPUT
+        // ==================================
+
+        const row = document.createElement("div");
+
+        Object.assign(row.style, {
+            display: "flex",
+            gap: "8px",
+            marginTop: "12px"
+        });
+
+        field = document.createElement("input");
+        field.type = "text";
+        field.placeholder = "Type a message...";
+        field.maxLength = 200;
+
+        Object.assign(field.style, {
+            minWidth: "0",
+            flex: "1",
+            borderRadius: "8px",
+            border: "0",
+            padding: "10px",
+            background: "#253650",
+            color: "white"
+        });
+
+        field.addEventListener(
+            "keydown",
+            event => {
+                if (event.key === "Enter") {
+                    sendMessage();
+                }
+            }
+        );
+
+        const sendButton = document.createElement("button");
+        sendButton.type = "button";
+        sendButton.textContent = "Send";
+
+        Object.assign(sendButton.style, {
+            background: "#4f96ff",
+            border: "0",
+            borderRadius: "8px",
+            color: "white",
+            padding: "8px 12px",
+            cursor: "pointer",
+            fontWeight: "bold"
+        });
+
+        sendButton.addEventListener(
+            "click",
+            sendMessage
+        );
+
+        row.appendChild(field);
+        row.appendChild(sendButton);
+        panel.appendChild(row);
+
+        // ==================================
+        // MINIMIZED CHAT BUTTON
+        // ==================================
+
+        launcher = document.createElement("button");
+        launcher.id = "browser-chat-launcher";
+        launcher.type = "button";
+        launcher.textContent = "💬 Room Chat";
+        launcher.title = "Open room chat";
+        launcher.setAttribute(
+            "aria-label",
+            "Expand room chat"
+        );
+
+        Object.assign(launcher.style, {
+            position: "fixed",
+            right: "16px",
+            bottom: "16px",
+            display: "none",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: "8px",
+            background: "#4f96ff",
+            color: "#fff",
+            border: "1px solid #7bb3ff",
+            borderRadius: "30px",
+            padding: "13px 20px",
+            fontSize: "14px",
+            fontWeight: "bold",
+            boxShadow: "0 6px 22px #0007",
+            cursor: "pointer",
+            zIndex: "1000",
+            fontFamily: "inherit"
+        });
+
+        launcher.addEventListener(
+            "click",
+            expandChat
+        );
+
+        document.body.appendChild(panel);
+        document.body.appendChild(launcher);
+    }
+
+    // ======================================
+    // RECEIVE CHAT MESSAGES
+    // ======================================
+
+    async function refreshChat() {
+        const room = typeof currentState !== "undefined"
+            ? currentState?.room
+            : null;
+
+        const loggedIn = (
+            typeof username !== "undefined" &&
+            !!username
+        );
+
+        const dashboard = document.getElementById(
+            "dashboard-screen"
+        );
+
+        if (
+            !loggedIn ||
+            !room ||
+            dashboard?.classList.contains("hidden")
+        ) {
+            if (panel || launcher) {
+                removeChat();
+            }
+            return;
+        }
+
+        if (
+            currentRoomId !== room.id ||
+            !panel?.isConnected
+        ) {
+            createChat(room.id);
+        }
+
+        if (polling) {
+            return;
+        }
+
+        polling = true;
+
+        const expectedRoom = currentRoomId;
+
+        try {
+            const response = await fetch(
+                "/api/chat/messages?after=" + lastMessageId,
+                {
+                    credentials: "same-origin",
+                    cache: "no-store"
+                }
+            );
+
+            const result = await response.json();
+
+            if (
+                result.success &&
+                currentRoomId === expectedRoom
+            ) {
+                for (const message of result.messages || []) {
+                    lastMessageId = Math.max(
+                        lastMessageId,
+                        message.id
+                    );
+
+                    if (message.room_id === currentRoomId) {
+                        appendLine(
+                            message.from,
+                            message.text
+                        );
+                    }
+                }
+            }
+
+        } catch (error) {
+            // Retry automatically on the next poll.
+
+        } finally {
+            polling = false;
+        }
+    }
+
+    // Polling continues while chat is minimized.
+    setInterval(refreshChat, 1500);
+    refreshChat();
+})();

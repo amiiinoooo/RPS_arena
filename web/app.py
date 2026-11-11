@@ -13,6 +13,7 @@ from flask import Flask, jsonify, render_template, request, session
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from waitress import serve
+from udp_chat_bridge import BrowserUDPChat
 
 
 # ==========================================
@@ -97,6 +98,7 @@ limiter = Limiter(
 
 connections = {}
 browser_tabs = {}
+browser_udp_chat = {}
 
 connections_lock = threading.RLock()
 
@@ -229,6 +231,11 @@ def remove_connection(sid):
             sid,
             None
         )
+
+        chat = browser_udp_chat.pop(sid, None)
+
+    if chat:
+        chat.close()
 
     if connection:
         connection.close()
@@ -445,6 +452,20 @@ def login():
 
             return jsonify(result)
 
+        # Create a private UDP bridge for this login.
+        try:
+            chat = BrowserUDPChat(
+                GAME_HOST,
+                result.get("chat_port", 5002),
+                result["heartbeat_token"]
+            )
+        except (OSError, KeyError):
+            connection.close()
+            return failure(
+                "Unable to initialize UDP chat.",
+                503
+            )
+
         sid = secrets.token_urlsafe(32)
 
         now = time.monotonic()
@@ -452,6 +473,7 @@ def login():
         with connections_lock:
 
             connections[sid] = connection
+            browser_udp_chat[sid] = chat
 
             browser_tabs[sid] = {
                 "_created": now,
@@ -851,6 +873,93 @@ def logout():
     )
 
 
+
+# ==========================================
+# BROWSER -> FLASK -> UDP ROOM CHAT
+# ==========================================
+
+@app.post("/api/chat/send")
+def browser_chat_send():
+    sid = current_sid()
+    data = request.get_json(silent=True)
+
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("text"), str)
+    ):
+        return failure("Invalid chat message.")
+
+    message = data["text"].strip()
+
+    if (
+        not message
+        or len(message) > 200
+        or "\x00" in message
+    ):
+        return failure(
+            "Message must contain 1-200 valid characters."
+        )
+
+    with connections_lock:
+        connection = connections.get(sid)
+        chat = browser_udp_chat.get(sid)
+
+    if not connection or not chat:
+        return failure(
+            "Please log in first.",
+            401
+        )
+
+    try:
+        state = connection.send("player_state")
+
+    except (OSError, ValueError, ConnectionError):
+        return server_unavailable()
+
+    if (
+        not state.get("success")
+        or not state.get("in_room")
+    ):
+        return failure("Join a room to chat.")
+
+    if not chat.send(message):
+        return failure(
+            "Chat unavailable or messages too frequent.",
+            429
+        )
+
+    return success("Message sent over UDP.")
+
+
+@app.get("/api/chat/messages")
+def browser_chat_messages():
+    sid = current_sid()
+
+    with connections_lock:
+        chat = browser_udp_chat.get(sid)
+
+    if chat is None:
+        return failure(
+            "Please log in first.",
+            401
+        )
+
+    try:
+        after = int(
+            request.args.get("after", "0")
+        )
+
+    except ValueError:
+        return failure("Invalid message ID.")
+
+    if after < 0:
+        return failure("Invalid message ID.")
+
+    return success(
+        messages=chat.since(after)
+    )
+
+
 # ==========================================
 # BROWSER SESSION CLEANUP
 # ==========================================
@@ -922,6 +1031,11 @@ def cleanup_sessions():
                     sid,
                     None
                 )
+
+                chat = browser_udp_chat.pop(sid, None)
+
+            if chat:
+                chat.close()
 
             if connection:
                 print(
