@@ -11,6 +11,8 @@ from tkinter import simpledialog
 SERVER_HOST = os.environ.get("RPS_SERVER_HOST", "127.0.0.1")
 TCP_PORT = 5000
 UDP_PORT = 5001
+COUNTDOWN_PORT = 5003
+CHAT_PORT = 5002
 
 BG = "#101827"
 PANEL = "#1B2940"
@@ -221,6 +223,227 @@ class HeartbeatWorker:
             ))
 
 
+
+# ==========================================
+# SEPARATE UDP COUNTDOWN RECEIVER - PORT 5003
+# ==========================================
+
+class CountdownWorker:
+    def __init__(self, inbox, token, port):
+        self.inbox = inbox
+        self.token = token
+        self.port = port
+        self.stop_event = threading.Event()
+
+        self.thread = threading.Thread(
+            target=self.run,
+            daemon=True
+        )
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+
+    def run(self):
+        try:
+            server_ip = socket.gethostbyname(SERVER_HOST)
+
+            with socket.socket(
+                socket.AF_INET, socket.SOCK_DGRAM
+            ) as udp:
+                udp.settimeout(0.5)
+
+                next_registration = 0.0
+                last_sequence = -1
+
+                while not self.stop_event.is_set():
+                    now = time.monotonic()
+
+                    if now >= next_registration:
+                        registration = json.dumps({
+                            "type": "countdown_register",
+                            "token": self.token
+                        }).encode("utf-8")
+
+                        udp.sendto(
+                            registration,
+                            (server_ip, self.port)
+                        )
+
+                        next_registration = now + 3.0
+
+                    try:
+                        data, sender = udp.recvfrom(2048)
+
+                        if sender != (server_ip, self.port):
+                            continue
+
+                        packet = json.loads(
+                            data.decode("utf-8")
+                        )
+
+                        if not isinstance(packet, dict):
+                            continue
+
+                        if packet.get("type") != "countdown":
+                            continue
+
+                        seq = packet.get("seq")
+                        room = packet.get("room_id")
+                        round_number = packet.get("round")
+                        remaining = packet.get("remaining")
+                        match_id = packet.get("match_id")
+
+                        if not (
+                            type(seq) is int
+                            and seq > last_sequence
+                            and type(room) is int
+                            and room > 0
+                            and type(round_number) is int
+                            and round_number > 0
+                            and type(remaining) is int
+                            and 0 <= remaining <= 60
+                            and isinstance(match_id, str)
+                            and len(match_id) == 24
+                        ):
+                            continue
+
+                        last_sequence = seq
+
+                        packet["worker"] = self
+                        packet["received_at"] = time.monotonic()
+
+                        self.inbox.put(
+                            ("countdown", packet)
+                        )
+
+                    except socket.timeout:
+                        continue
+
+                    except (ValueError, UnicodeError):
+                        continue
+
+        except OSError as exc:
+            if not self.stop_event.is_set():
+                self.inbox.put((
+                    "countdown_error",
+                    {
+                        "worker": self,
+                        "message": str(exc)
+                    }
+                ))
+
+
+
+# ==========================================
+# UDP ROOM CHAT CLIENT (PORT 5002)
+# ==========================================
+
+class ChatWorker:
+    def __init__(self, inbox, token, port):
+        self.inbox = inbox
+        self.token = token
+        self.port = port
+
+        self.stop_event = threading.Event()
+        self.outgoing = queue.Queue()
+
+        self.thread = threading.Thread(
+            target=self.run,
+            daemon=True
+        )
+        self.thread.start()
+
+    def send(self, text):
+        self.outgoing.put(text)
+
+    def stop(self):
+        self.stop_event.set()
+
+    def run(self):
+        try:
+            server_ip = socket.gethostbyname(SERVER_HOST)
+
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+                udp.settimeout(0.2)
+                next_registration = 0.0
+
+                while not self.stop_event.is_set():
+                    if time.monotonic() >= next_registration:
+                        packet = {
+                            "type": "chat_register",
+                            "token": self.token
+                        }
+
+                        udp.sendto(
+                            json.dumps(packet).encode("utf-8"),
+                            (server_ip, self.port)
+                        )
+
+                        next_registration = time.monotonic() + 3
+
+                    try:
+                        while True:
+                            text = self.outgoing.get_nowait()
+
+                            packet = {
+                                "type": "room_chat",
+                                "token": self.token,
+                                "text": text
+                            }
+
+                            udp.sendto(
+                                json.dumps(packet).encode("utf-8"),
+                                (server_ip, self.port)
+                            )
+
+                    except queue.Empty:
+                        pass
+
+                    try:
+                        data, address = udp.recvfrom(2048)
+
+                        if address != (server_ip, self.port):
+                            continue
+
+                        reply = json.loads(data.decode("utf-8"))
+
+                        if (
+                            not isinstance(reply, dict)
+                            or reply.get("type") != "room_chat"
+                            or type(reply.get("room_id")) is not int
+                            or not isinstance(reply.get("from"), str)
+                            or not isinstance(reply.get("text"), str)
+                        ):
+                            continue
+
+                        self.inbox.put((
+                            "chat_message",
+                            {
+                                "worker": self,
+                                "room_id": reply["room_id"],
+                                "from": reply["from"],
+                                "text": reply["text"]
+                            }
+                        ))
+
+                    except socket.timeout:
+                        pass
+
+                    except (ValueError, UnicodeError):
+                        pass
+
+        except OSError as exc:
+            if not self.stop_event.is_set():
+                self.inbox.put((
+                    "chat_error",
+                    {
+                        "worker": self,
+                        "message": str(exc)
+                    }
+                ))
+
+
 # ==========================================
 # TKINTER APPLICATION
 # ==========================================
@@ -239,6 +462,15 @@ class RPSApp:
         self.network = NetworkWorker(self.inbox)
 
         self.heartbeat = None
+        self.countdown_worker = None
+        self.countdown_packet = None
+        self.countdown_label = None
+        self.chat_worker = None
+        self.chat_window = None
+        self.chat_log = None
+        self.chat_entry = None
+        self.chat_history = {}
+        self.chat_room_id = None
         self.udp_ok = False
         self.udp_last_ack = None
         self.udp_metrics = None
@@ -288,6 +520,8 @@ class RPSApp:
     # ======================================
 
     def close(self):
+        self.stop_chat()
+        self.stop_countdown()
         self.stop_heartbeat()
         self.network.close()
         self.root.destroy()
@@ -311,6 +545,190 @@ class RPSApp:
             token,
             port
         )
+
+    def start_chat(self, token, port):
+        self.stop_chat()
+        self.chat_worker = ChatWorker(self.inbox, token, port)
+
+    def stop_chat(self):
+        if self.chat_worker:
+            self.chat_worker.stop()
+
+        self.chat_worker = None
+        self.close_chat_window()
+        self.chat_history.clear()
+        self.chat_room_id = None
+
+    def close_chat_window(self):
+        if self.chat_window is not None:
+            try:
+                self.chat_window.destroy()
+            except tk.TclError:
+                pass
+
+        self.chat_window = None
+        self.chat_log = None
+        self.chat_entry = None
+
+    def open_chat_window(self):
+        if not self.room or not self.logged_in:
+            return
+
+        room_id = self.room["id"]
+
+        if self.chat_window and self.chat_window.winfo_exists():
+            if self.chat_room_id == room_id:
+                self.chat_window.lift()
+                self.chat_entry.focus_set()
+                return
+
+            self.close_chat_window()
+
+        self.chat_room_id = room_id
+
+        window = tk.Toplevel(self.root)
+        window.title(f"UDP Room Chat | Room #{room_id}")
+        window.geometry("440x340")
+        window.configure(bg=BG)
+
+        window.protocol(
+            "WM_DELETE_WINDOW",
+            self.close_chat_window
+        )
+
+        self.chat_window = window
+
+        tk.Label(
+            window,
+            text=f"ROOM CHAT  |  UDP {CHAT_PORT}",
+            bg=BG,
+            fg=BLUE,
+            font=("Segoe UI", 14, "bold")
+        ).pack(pady=(15, 8))
+
+        self.chat_log = tk.Text(
+            window,
+            height=10,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            font=("Segoe UI", 11),
+            wrap="word"
+        )
+
+        self.chat_log.pack(
+            fill="both",
+            expand=True,
+            padx=12
+        )
+
+        self.chat_log.config(state="disabled")
+
+        row = tk.Frame(window, bg=BG)
+        row.pack(fill="x", padx=12, pady=12)
+
+        self.chat_entry = tk.Entry(
+            row,
+            bg=LIGHT,
+            fg=TEXT,
+            insertbackground=TEXT,
+            font=("Segoe UI", 11),
+            relief="flat"
+        )
+
+        self.chat_entry.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            ipady=7
+        )
+
+        self.chat_entry.bind(
+            "<Return>",
+            lambda event: self.send_chat()
+        )
+
+        self.button(
+            row,
+            "Send",
+            self.send_chat,
+            side="right",
+            padx=(8, 0)
+        )
+
+        self.refresh_chat_log()
+        self.chat_entry.focus_set()
+
+    def refresh_chat_log(self):
+        if not self.chat_log or not self.chat_room_id:
+            return
+
+        lines = self.chat_history.get(
+            self.chat_room_id,
+            []
+        )
+
+        self.chat_log.config(state="normal")
+        self.chat_log.delete("1.0", "end")
+        self.chat_log.insert("end", "\n".join(lines))
+        self.chat_log.see("end")
+        self.chat_log.config(state="disabled")
+
+    def send_chat(self):
+        if not self.room or not self.chat_entry:
+            return
+
+        text = self.chat_entry.get().strip()
+
+        if not text:
+            return
+
+        if len(text) > 200:
+            self.notice(
+                "Chat messages must be at most 200 characters.",
+                True
+            )
+            return
+
+        if not self.chat_worker:
+            self.notice("UDP chat is not connected.", True)
+            return
+
+        self.chat_worker.send(text)
+        self.chat_entry.delete(0, "end")
+
+    def receive_chat(self, packet):
+        if not self.room or packet["room_id"] != self.room["id"]:
+            return
+
+        room_id = packet["room_id"]
+        lines = self.chat_history.setdefault(room_id, [])
+
+        lines.append(
+            f"{packet['from']}: {packet['text']}"
+        )
+
+        if len(lines) > 80:
+            del lines[:-80]
+
+        if self.chat_room_id == room_id:
+            self.refresh_chat_log()
+
+    def start_countdown(self, token, port):
+        self.stop_countdown()
+
+        self.countdown_worker = CountdownWorker(
+            self.inbox, token, port
+        )
+
+    def stop_countdown(self):
+        if self.countdown_worker:
+            self.countdown_worker.stop()
+
+        self.countdown_worker = None
+        self.countdown_packet = None
+        self.countdown_label = None
 
     def stop_heartbeat(self):
         if self.heartbeat:
@@ -339,6 +757,8 @@ class RPSApp:
                     self.match = None
                     self.poll_busy = False
 
+                    self.stop_chat()
+                    self.stop_countdown()
                     self.stop_heartbeat()
 
                     self.notice("TCP disconnected: " + data, True)
@@ -359,6 +779,26 @@ class RPSApp:
 
                         self.update_footer()
                         self.update_network_monitor_ui()
+
+                elif kind == "countdown":
+                    if self.countdown_worker is data["worker"]:
+                        self.countdown_packet = data
+                        self.update_countdown_label()
+
+                elif kind == "chat_message":
+                    if self.chat_worker is data["worker"]:
+                        self.receive_chat(data)
+
+                elif kind == "chat_error":
+                    if self.chat_worker is data["worker"]:
+                        self.notice(
+                            "UDP chat error: " + data["message"], True
+                        )
+
+                elif kind == "countdown_error":
+                    if self.countdown_worker is data["worker"]:
+                        self.countdown_packet = None
+                        self.update_countdown_label()
 
                 elif kind == "heartbeat_error":
                     if self.heartbeat is data["worker"]:
@@ -507,6 +947,7 @@ class RPSApp:
     # ======================================
 
     def clear(self):
+        self.countdown_label = None
         for child in self.header.winfo_children():
             child.destroy()
 
@@ -704,6 +1145,14 @@ class RPSApp:
                     response["heartbeat_token"],
                     response.get("udp_port", UDP_PORT)
                 )
+                self.start_countdown(
+                    response["heartbeat_token"],
+                    response.get("countdown_port", COUNTDOWN_PORT)
+                )
+                self.start_chat(
+                    response["heartbeat_token"],
+                    response.get("chat_port", CHAT_PORT)
+                )
 
                 self.last_snapshot = None
                 self.refresh_state()
@@ -876,6 +1325,11 @@ class RPSApp:
             side="right"
         )
 
+        self.button(
+            self.body, "Open UDP Room Chat",
+            self.open_chat_window, LIGHT, pady=(4, 8)
+        )
+
         if not room["can_start"]:
             self.label(
                 self.body,
@@ -934,7 +1388,43 @@ class RPSApp:
     # GAME SCREEN
     # ======================================
 
+    def update_countdown_label(self):
+        if (
+            not self.countdown_label
+            or not self.match
+            or not self.room
+        ):
+            return
+
+        if self.match.get("phase") != "choosing":
+            return
+
+        packet = self.countdown_packet
+
+        valid = (
+            packet is not None
+            and time.monotonic() - packet["received_at"] < 2.5
+            and packet["room_id"] == self.room.get("id")
+            and packet["round"] == self.match.get("round")
+            and packet["match_id"] == self.match.get("id")
+        )
+
+        if valid:
+            seconds = packet["remaining"]
+            transport = "UDP 5003"
+        else:
+            seconds = self.match["remaining"]
+            transport = "TCP fallback"
+
+        self.countdown_label.config(
+            text=f"Time remaining: {seconds} seconds ({transport})"
+        )
+
     def render_game(self):
+        self.button(
+            self.body, "Open UDP Room Chat",
+            self.open_chat_window, LIGHT, pady=(0, 6)
+        )
         if not self.match:
             self.label(self.body, "Preparing match...", 16, MUTED)
             return
@@ -946,13 +1436,14 @@ class RPSApp:
             title += " | TIEBREAKER"
 
         self.label(self.body, title, 22, TEXT, True)
-        self.label(
+        self.countdown_label = self.label(
             self.body,
-            f"Time remaining: {match['remaining']} seconds",
+            f"Time remaining: {match['remaining']} seconds (TCP)",
             14,
             GREEN,
             pady=(5, 9)
         )
+        self.update_countdown_label()
 
         self.score_panel(match["scores"])
 
@@ -1037,6 +1528,10 @@ class RPSApp:
     # ======================================
 
     def render_finished(self):
+        self.button(
+            self.body, "Open UDP Room Chat",
+            self.open_chat_window, LIGHT, pady=(0, 6)
+        )
         if not self.match:
             self.label(self.body, "Loading results...", 16, MUTED)
             return
@@ -1111,6 +1606,8 @@ class RPSApp:
         self.notice(response.get("message", ""), not response.get("success"))
 
         if action == "logout" and response.get("success"):
+            self.stop_chat()
+            self.stop_countdown()
             self.stop_heartbeat()
 
             self.logged_in = False
@@ -1149,6 +1646,10 @@ class RPSApp:
             return
 
         self.room = response.get("room") if response.get("in_room") else None
+        if self.chat_window and (
+            not self.room or self.room["id"] != self.chat_room_id
+        ):
+            self.close_chat_window()
 
         if self.room and self.room["status"] in ("playing", "finished"):
             self.request("game_state", self.game_result)
@@ -1196,6 +1697,7 @@ class RPSApp:
 
         self.update_footer()
         self.update_network_monitor_ui()
+        self.update_countdown_label()
 
         self.root.after(1000, self.poll)
 
@@ -1211,4 +1713,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main()  
