@@ -27,3 +27,13 @@ Thumbs.db
 # Logs
 *.log
 cmd to put site online.md
+
+# Local feature installation scripts
+enable_*.py
+make_browser_chat_collapsible.py
+
+# Source code backups
+*.before_chat
+*.before_countdown
+*.before_browser_chat
+*.before_collapsible_chat
