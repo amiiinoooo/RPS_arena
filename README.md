@@ -59,4 +59,7 @@ To put the web version online: `tailscale funnel 8000`.
 
 Python · sockets (TCP/UDP) · SQLite · Tkinter · Flask · Waitress · JavaScript · Tailscale
 
-📄 [Communication design document](docs/communication-design.pdf)
+## Slides & reports
+
+- 📊 [Presentation slides](docs/RPS.pdf)
+- 📄 [Communication design document](docs/communication-design.pdf)
